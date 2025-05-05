@@ -1,0 +1,911 @@
+"""
+Unified MCP HTTP API Server
+シンプルなHTTP APIのみを提供するサーバーモジュール
+
+依存関係は vendor ディレクトリにインストールされています
+"""
+
+import bpy
+import json
+import threading
+import traceback
+import datetime
+import time
+import logging
+import uuid
+import os
+import sys
+import signal
+import socket
+from typing import Any, Dict, List, Optional, Union, Callable, TypeVar
+from contextlib import contextmanager
+
+# Pydantic依存関係のインポート
+try:
+    from pydantic import BaseModel, Field
+    PYDANTIC_AVAILABLE = True
+except ImportError:
+    # Pydanticが利用できない場合の互換用クラス
+    class BaseModel:
+        """Pydantic BaseModelの互換用クラス"""
+        def __init__(self, **kwargs):
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+        
+        def dict(self):
+            """dictメソッドの互換実装"""
+            return self.__dict__
+    
+    def Field(*args, **kwargs):
+        return None
+    
+    PYDANTIC_AVAILABLE = False
+
+# ユーザーのサイトパッケージが確実に参照されるようにする
+user_site_packages = os.path.expanduser("~/.local/lib/python3.11/site-packages")
+if os.path.exists(user_site_packages) and user_site_packages not in sys.path:
+    sys.path.insert(0, user_site_packages)
+    print(f"ユーザーサイトパッケージを追加しました: {user_site_packages}")
+
+# ロギング設定
+logger = logging.getLogger('unified_mcp.server')
+
+# 新しいAPIモジュールをインポート
+try:
+    from .api import UnifiedMCPAPI
+    API_AVAILABLE = True
+    logger.info("Unified MCP APIを利用可能")
+except ImportError as e:
+    API_AVAILABLE = False
+    logger.error(f"Unified MCP APIインポートエラー: {str(e)}")
+
+# GraphQL可用性のフラグを初期化
+GRAPHQL_AVAILABLE = False
+
+# 循環参照を避けるために遅延読み込み関数を定義
+def _load_graphql_dependencies():
+    """遅延読み込み関数: GraphQL依存関係を読み込みます"""
+    global GRAPHQL_AVAILABLE, query_blender
+    
+    try:
+        # GraphQLモジュールを遅延インポート
+        from ..graphql import api
+        if hasattr(api, 'query_blender') and hasattr(api, 'GRAPHQL_AVAILABLE'):
+            query_blender = api.query_blender
+            GRAPHQL_AVAILABLE = api.GRAPHQL_AVAILABLE
+            logger.info(f"GraphQL機能を利用可能: {GRAPHQL_AVAILABLE}")
+            if not GRAPHQL_AVAILABLE:
+                logger.warning("GraphQLライブラリは使用できません。pipでgraphql-core (v3+)をインストールしてください。")
+            return GRAPHQL_AVAILABLE
+        else:
+            logger.warning("GraphQL APIモジュールに必要な関数がありません")
+            return False
+    except ImportError as e:
+        logger.warning(f"GraphQLモジュールのインポートエラー: {e}")
+        logger.warning("GraphQL機能は無効です。")
+        return False
+    except Exception as e:
+        logger.error(f"GraphQLモジュール読み込み中の予期せぬエラー: {e}")
+        import traceback
+        logger.debug(traceback.format_exc())
+        return False
+
+# FastAPIのインポート
+try:
+    from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Response, Depends
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
+    from fastapi.openapi.utils import get_openapi
+    from fastapi.staticfiles import StaticFiles
+    HTTP_SERVER_PARTIAL = True
+    logger.info("FastAPIが正常にインポートされました")
+    
+    import fastapi
+    logger.info(f"FastAPIバージョン: {fastapi.__version__}")
+except ImportError as e:
+    HTTP_SERVER_PARTIAL = False
+    logger.error(f"FastAPIインポートエラー: {str(e)}")
+
+# 新しいモジュールをインポート
+try:
+    from .errors import MCPError, create_error_response, handle_errors
+    from .models import APIResponse
+    from .api_routes import router as api_router
+    NEW_API_MODULES_AVAILABLE = True
+    logger.info("拡張APIモジュールがインポートされました")
+except ImportError as e:
+    NEW_API_MODULES_AVAILABLE = False
+    logger.error(f"拡張APIモジュールのインポートエラー: {str(e)}")
+
+# uvicornのインポート
+try:
+    import uvicorn
+    from uvicorn.config import Config
+    from uvicorn.server import Server
+    UVICORN_AVAILABLE = True
+    logger.info("uvicornが正常にインポートされました")
+    logger.info(f"uvicornバージョン: {uvicorn.__version__}")
+except ImportError as e:
+    UVICORN_AVAILABLE = False
+    logger.error(f"uvicornインポートエラー: {str(e)}")
+
+# pydanticのインポート
+try:
+    import pydantic
+    from pydantic import BaseModel, Field
+    PYDANTIC_AVAILABLE = True
+    logger.info("pydanticが正常にインポートされました")
+    logger.info(f"pydanticバージョン: {pydantic.__version__}")
+except ImportError as e:
+    PYDANTIC_AVAILABLE = False
+    logger.error(f"pydanticインポートエラー: {str(e)}")
+
+# 全体的な依存関係チェック
+HTTP_SERVER_AVAILABLE = HTTP_SERVER_PARTIAL and UVICORN_AVAILABLE and PYDANTIC_AVAILABLE
+
+if not HTTP_SERVER_AVAILABLE:
+    logger.error("HTTPサーバーの起動に必要な依存関係が不足しています。")
+    logger.error(f"FastAPI: {HTTP_SERVER_PARTIAL}, uvicorn: {UVICORN_AVAILABLE}, pydantic: {PYDANTIC_AVAILABLE}")
+
+# pydanticモデル
+if PYDANTIC_AVAILABLE:
+    class MCPRequest(BaseModel):
+        type: str = Field(..., description="リクエストタイプ: 'command', 'query', 'graphql'")
+        command: Optional[Dict[str, Any]] = Field(None, description="コマンドリクエストデータ")
+        query: Optional[Dict[str, Any]] = Field(None, description="クエリリクエストデータ")
+        graphql: Optional[Dict[str, Any]] = Field(None, description="GraphQLリクエストデータ")
+    
+    class BlenderCodeRequest(BaseModel):
+        code: str = Field(..., description="実行するPythonコード")
+        save_blend: bool = Field(False, description="実行前にBlendファイルを保存するかどうか")
+    
+    class LogRequest(BaseModel):
+        lines: int = Field(100, description="取得する行数", ge=1, le=1000)
+
+
+class MCPHttpServer:
+    """
+    Unified MCP HTTP APIサーバー
+    """
+    
+    # シングルトンインスタンス
+    _instance = None
+    
+    @classmethod
+    def get_instance(cls):
+        """シングルトンインスタンスを取得"""
+        if cls._instance is None:
+            cls._instance = MCPHttpServer()
+        return cls._instance
+    
+    def __init__(self):
+        """初期化"""
+        if not self.__class__._instance:
+            self.api = UnifiedMCPAPI() if API_AVAILABLE else None
+            self.server_thread = None
+            self.server_running = False
+            self.port = 8000
+            self.host = "0.0.0.0"
+            self.app = None
+            self.api_functions = {}
+            self.log_file = os.path.join(bpy.utils.user_resource('SCRIPTS'), 'addons', 'blender_json_mcp', 'server.log')
+            self.uvicorn_server = None  # Uvicornサーバーインスタンスを保持
+            self.shutdown_event = None  # シャットダウンイベント
+            self.start_time = time.time()  # 開始時間を記録
+            
+            # ロギング設定
+            self._setup_logging()
+            
+            logger.info("MCPHttpServerが初期化されました")
+    
+    def _setup_logging(self):
+        """ロギングをセットアップ"""
+        os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
+        
+        file_handler = logging.FileHandler(self.log_file, encoding='utf-8')
+        file_handler.setLevel(logging.DEBUG)
+        
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(formatter)
+        
+        logger.addHandler(file_handler)
+        logger.setLevel(logging.DEBUG)
+    
+    def register_function(self, func: Callable, name: str, examples: List[Dict[str, Any]] = None, schema: Dict[str, Any] = None):
+        """関数をAPIに登録"""
+        self.api_functions[name] = {
+            'func': func,
+            'examples': examples or [],
+            'schema': schema or {}
+        }
+        logger.info(f"関数 '{name}' をAPIに登録しました")
+    
+    def start(self) -> bool:
+        """サーバーを起動"""
+        if not HTTP_SERVER_AVAILABLE:
+            logger.error("一部の依存関係が不足しているため、サーバーを起動できません")
+            return False
+        
+        if self.server_running:
+            logger.warning("サーバーは既に実行中です")
+            return True
+        
+        try:
+            # FastAPIアプリケーションを作成
+            self.app = FastAPI(
+                title="Blender Unified MCP API",
+                description="Blender向けのJSON-RPC APIサーバー",
+                version="1.0.0"
+            )
+            
+            # CORSミドルウェアを追加
+            self.app.add_middleware(
+                CORSMiddleware,
+                allow_origins=["*"],
+                allow_credentials=True,
+                allow_methods=["*"],
+                allow_headers=["*"],
+            )
+            
+            # GraphQLエンドポイントを追加
+            # GraphQL依存関係を遅延読み込み
+            graphql_loaded = _load_graphql_dependencies()
+            
+            if graphql_loaded:
+                try:
+                    @self.app.post("/graphql")
+                    async def graphql_endpoint(request: Request):
+                        """GraphQLリクエストを処理するエンドポイント"""
+                        try:
+                            # リクエストボディを取得
+                            request_data = await request.json()
+                            query = request_data.get("query")
+                            variables = request_data.get("variables", {})
+                            
+                            if not query:
+                                return {"errors": [{"message": "queryパラメーターが必要です"}]}
+                            
+                            logger.info(f"GraphQLクエリを受信: {query[:100]}...")
+                            # query_blenderが遅延ロードされていることを確認
+                            if 'query_blender' not in globals():
+                                _load_graphql_dependencies()
+                            result = query_blender(query, variables)
+                            return result
+                        except Exception as e:
+                            logger.error(f"GraphQLリクエスト処理エラー: {str(e)}")
+                            import traceback
+                            logger.debug(traceback.format_exc())
+                            return {"errors": [{"message": f"GraphQLリクエスト処理エラー: {str(e)}"}]}
+                    
+                    logger.info("GraphQLエンドポイントを追加: /graphql")
+                except Exception as e:
+                    logger.error(f"GraphQLエンドポイント追加エラー: {e}")
+                    import traceback
+                    logger.debug(traceback.format_exc())
+            else:
+                logger.warning("GraphQLが利用できないため、GraphQLエンドポイントは追加されません")
+            
+            # エラーハンドラの追加
+            try:
+                from .api_routes import mcp_error_handler, general_exception_handler
+                from .errors import MCPError
+                
+                # MCP固有のエラーハンドラ
+                self.app.add_exception_handler(MCPError, mcp_error_handler)
+                
+                # 一般的な例外ハンドラ
+                self.app.add_exception_handler(Exception, general_exception_handler)
+                
+                logger.info("エラーハンドラが正常に登録されました")
+            except ImportError as e:
+                logger.error(f"エラーハンドラの登録に失敗しました: {str(e)}")
+                logger.debug(traceback.format_exc())
+            
+            # 認証機能は無効化されています
+            
+            # APIルートを設定
+            self._setup_routes()
+            
+            # サーバーを別スレッドで起動
+            self.server_thread = threading.Thread(
+                target=self._run_server,
+                daemon=True
+            )
+            self.server_thread.start()
+            
+            # サーバー起動を報告
+            logger.info(f"HTTPサーバーをポート {self.port} で起動しました")
+            self.server_running = True
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"サーバー起動中にエラーが発生: {str(e)}")
+            logger.error(traceback.format_exc())
+            return False
+    
+    def _setup_routes(self):
+        """APIルートを設定"""
+        
+        # 新しいUnified MCP APIエンドポイント
+        @self.app.post("/api/v1")
+        async def process_api_request(request: MCPRequest):
+            try:
+                # APIコールを処理
+                if request.type == "command" and request.command:
+                    # APIクラスを介してコマンドを実行
+                    if not API_AVAILABLE:
+                        raise HTTPException(status_code=503, detail="Unified MCP APIが利用できません")
+                    return self.api.process_request({"type": "command", "command": request.command})
+                
+                elif request.type == "query" and request.query:
+                    # APIクラスを介してクエリを実行
+                    if not API_AVAILABLE:
+                        raise HTTPException(status_code=503, detail="Unified MCP APIが利用できません")
+                    return self.api.process_request({"type": "query", "query": request.query})
+                
+                elif request.type == "graphql" and request.graphql and GRAPHQL_AVAILABLE:
+                    # GraphQLクエリを実行
+                    query = request.graphql.get("query", "")
+                    variables = request.graphql.get("variables", {})
+                    
+                    if not query:
+                        raise HTTPException(status_code=400, detail="GraphQLクエリが指定されていません")
+                    
+                    result = query_blender(query, variables)
+                    return {"success": True, "data": result}
+                
+                else:
+                    raise HTTPException(status_code=400, detail="無効なリクエストタイプまたはデータ")
+                
+            except Exception as e:
+                logger.error(f"APIリクエスト処理中にエラーが発生: {str(e)}")
+                logger.error(traceback.format_exc())
+                
+                return {
+                    "success": False,
+                    "error": str(e),
+                    "traceback": traceback.format_exc()
+                }
+        
+        # レガシー関数エンドポイント
+        @self.app.post("/function/{func_name}")
+        async def call_function(func_name: str, request: Request):
+            # 登録された関数のみを許可
+            if func_name not in self.api_functions:
+                raise HTTPException(status_code=404, detail=f"関数 {func_name} は登録されていません")
+            
+            try:
+                # リクエストボディをJSONとして解析
+                body = await request.json()
+                
+                # 関数を呼び出し
+                func_data = self.api_functions[func_name]
+                func = func_data['func']
+                
+                # Blenderのメインスレッドで実行
+                def execute_in_main_thread():
+                    with self._blender_data_context():
+                        return func(body)
+                
+                result = self._run_in_main_thread(execute_in_main_thread)
+                return {"success": True, "result": result}
+                
+            except Exception as e:
+                logger.error(f"関数 {func_name} の呼び出し中にエラーが発生: {str(e)}")
+                logger.error(traceback.format_exc())
+                
+                return {
+                    "success": False,
+                    "error": str(e),
+                    "traceback": traceback.format_exc()
+                }
+                
+        # MCP統合コマンドエンドポイント
+        @self.app.post("/mcp/command")
+        async def execute_mcp_command(request: Request):
+            try:
+                # リクエストボディをJSONとして解析
+                command_data = await request.json()
+                
+                # コマンドハンドラモジュールをインポート
+                from . import api_handlers
+                
+                # Blenderのメインスレッドで実行
+                def execute_in_main_thread():
+                    with self._blender_data_context():
+                        return api_handlers.execute_mcp_command(command_data)
+                
+                result = self._run_in_main_thread(execute_in_main_thread)
+                return result
+                
+            except Exception as e:
+                logger.error(f"MCPコマンド実行中にエラーが発生: {str(e)}")
+                logger.error(traceback.format_exc())
+                
+                return {
+                    "status": "error",
+                    "message": f"Command execution failed: {str(e)}",
+                    "details": {
+                        "exception": str(e),
+                        "traceback": traceback.format_exc()
+                    }
+                }
+                
+        # シーン分析エンドポイント
+        @self.app.post("/mcp/analyze/scene")
+        async def analyze_scene(request: Request):
+            try:
+                # リクエストボディをJSONとして解析
+                params = await request.json()
+                
+                # メタコマンドモジュールをインポート
+                from . import meta_commands
+                
+                # Blenderのメインスレッドで実行
+                def execute_in_main_thread():
+                    with self._blender_data_context():
+                        return meta_commands.handle_analyze_object_command(params)
+                
+                result = self._run_in_main_thread(execute_in_main_thread)
+                return result
+                
+            except Exception as e:
+                logger.error(f"オブジェクト分析中にエラーが発生: {str(e)}")
+                logger.error(traceback.format_exc())
+                
+                return {
+                    "status": "error",
+                    "message": f"Object analysis failed: {str(e)}",
+                    "details": {
+                        "exception": str(e)
+                    }
+                }
+        
+        # JSONエンドポイントのみを使用するため、Pythonコード実行エンドポイントは削除
+        
+        # サーバー状態の取得エンドポイント
+        @self.app.get("/status")
+        async def get_status():
+            return {
+                "status": "running",
+                "uptime": self._get_uptime(),
+                "api_available": API_AVAILABLE,
+                "graphql_available": GRAPHQL_AVAILABLE,
+                "registered_functions": list(self.api_functions.keys())
+            }
+        
+        # ログの取得エンドポイント
+        @self.app.post("/logs")
+        async def get_server_logs(request: LogRequest):
+            lines = request.lines
+            log_data = self.get_logs({"lines": lines})
+            return log_data
+            
+        # OpenAPIドキュメントを設定
+        @self.app.get("/docs", include_in_schema=False)
+        async def get_swagger_ui():
+            return get_swagger_ui_html(
+                openapi_url="/openapi.json",
+                title="Blender Unified MCP API Documentation"
+            )
+        
+        # カスタムOpenAPI情報
+        @self.app.get("/docs", include_in_schema=False)
+        async def get_swagger_ui():
+            return get_swagger_ui_html(
+                openapi_url="/openapi.json",
+                title="Blender Unified MCP API Documentation"
+            )
+                
+        @self.app.get("/redoc", include_in_schema=False)
+        async def get_redoc():
+            return get_redoc_html(
+                openapi_url="/openapi.json",
+                title="Blender Unified MCP API Documentation"
+            )
+        
+        # OpenAPIスキーマのカスタマイズ
+        def custom_openapi():
+            if self.app.openapi_schema:
+                return self.app.openapi_schema
+            
+            openapi_schema = get_openapi(
+                title="Blender Unified MCP API",
+                version="1.0.0",
+                description="Blenderの操作と自動化のためのREST APIとGraphQL API",
+                routes=self.app.routes
+            )
+            
+            # 情報を拡張
+            openapi_schema["info"]["contact"] = {
+                "name": "Blender Unified MCP",
+                "url": "https://github.com/your-repo/blender-unified-mcp",
+                "email": "your-email@example.com"
+            }
+            
+            self.app.openapi_schema = openapi_schema
+            return self.app.openapi_schema
+        
+        self.app.openapi = custom_openapi
+                            "auth_enabled": False
+                        },
+                        "blender": {
+                            "version": bpy.app.version_string,
+                            "build_date": bpy.app.build_date.decode('utf-8'),
+                            "scene": bpy.context.scene.name if bpy.context.scene else None,
+                            "object_count": len(bpy.data.objects)
+                        },
+                        "api": {
+                            "graphql": GRAPHQL_AVAILABLE,
+                            "rest": True,
+                            "extended_api": NEW_API_MODULES_AVAILABLE
+                        }
+                    }).to_dict()
+            
+            except Exception as e:
+                logger.error(f"拡張API設定エラー: {str(e)}")
+    
+    def _run_server(self):
+        """サーバーを実行（別スレッドで呼び出される）"""
+        try:
+            # uvicornの設定を構成
+            config = Config(
+                app=self.app,
+                host=self.host,
+                port=self.port,
+                log_level="info"
+            )
+            
+            # シャットダウンイベントを設定
+            self.shutdown_event = threading.Event()
+            
+            # サーバーインスタンスを作成
+            self.uvicorn_server = Server(config=config)
+            
+            # 強制シャットダウンタイムアウトを設定
+            self.uvicorn_server.force_exit = True
+            
+            # サーバーを起動
+            self.uvicorn_server.run()
+        except Exception as e:
+            logger.error(f"サーバー実行中にエラーが発生: {str(e)}")
+            logger.error(traceback.format_exc())
+        finally:
+            self.server_running = False
+    
+    def stop(self):
+        """サーバーを停止"""
+        if not self.server_running:
+            logger.info("サーバーは既に停止しています")
+            return
+        
+        # ポートの利用可能性を確認するヘルパー関数
+        def is_port_available(port, host='127.0.0.1'):
+            """ポートが利用可能かどうかを確認"""
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            available = False
+            try:
+                sock.bind((host, port))
+                available = True
+            except Exception as e:
+                logger.debug(f"ポート {port} はまだ使用中です: {e}")
+                available = False
+            finally:
+                sock.close()
+            return available
+            
+        logger.info(f"ポート {self.port} でサーバーを停止しています...")
+        
+        try:
+            # 終了フラグを設定
+            self.server_running = False
+            
+            if self.uvicorn_server:
+                # シャットダウンイベントを設定
+                if self.shutdown_event:
+                    self.shutdown_event.set()
+                
+                # 停止シグナルを送信・確実に停止するための強制フラグを設定
+                self.uvicorn_server.should_exit = True
+                if hasattr(self.uvicorn_server, "force_exit"):
+                    self.uvicorn_server.force_exit = True
+                
+                # サーバーに停止シグナルを送信
+                try:
+                    # ローカルホストへの接続で停止シグナルを送信
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(1)
+                    sock.connect((self.host if self.host != "0.0.0.0" else "127.0.0.1", self.port))
+                    sock.close()
+                except Exception as e:
+                    # 接続に失敗した場合は記録
+                    logger.debug(f"停止シグナル送信時のエラー: {e}")
+            
+            # ポートの解放を待機（最大3秒）
+            port_release_timeout = 3.0
+            start_time = time.time()
+            port_released = False
+            
+            # すでに利用可能な場合はチェックをスキップ
+            if is_port_available(self.port):
+                port_released = True
+                logger.debug(f"ポート {self.port} は既に利用可能です")
+            else:
+                # ポートの解放を待機
+                logger.debug(f"ポート {self.port} の解放を待機中...")
+                while not is_port_available(self.port) and time.time() - start_time < port_release_timeout:
+                    time.sleep(0.1)
+                    
+                # ポートが解放されたか確認
+                port_released = is_port_available(self.port)
+            
+            # 結果をログに記録
+            if port_released:
+                logger.info(f"ポート {self.port} の解放を確認しました")
+            else:
+                logger.warning(f"ポート {self.port} の解放を確認できませんでした")
+            
+            logger.info("サーバーを停止しました")
+        except Exception as e:
+            logger.error(f"サーバー停止中にエラーが発生: {str(e)}")
+            logger.error(traceback.format_exc())
+    
+    def safe_shutdown(self):
+        """サーバーを安全に停止"""
+        if self.server_running:
+            logger.info("サーバーの安全な停止を開始...")
+            self.stop()
+            
+            # スレッドの終了を待機（最大5秒）
+            if self.server_thread and self.server_thread.is_alive():
+                try:
+                    self.server_thread.join(timeout=5.0)
+                    if self.server_thread.is_alive():
+                        logger.warning("サーバースレッドが5秒以内に終了しませんでした。強制終了します。")
+                except Exception as e:
+                    logger.error(f"スレッド終了待機中にエラーが発生: {str(e)}")
+            
+            logger.info("HTTPサーバーが安全に停止しました")
+    
+    @contextmanager
+    def _blender_data_context(self):
+        """Blenderのデータコンテキストを提供するコンテキストマネージャ"""
+        # コンテキスト開始時の処理
+        try:
+            # Blenderコンテキストを有効化
+            yield
+        finally:
+            # コンテキスト終了時の処理（クリーンアップなど）
+            pass
+    
+    def _run_in_main_thread(self, func):
+        """関数をBlenderのメインスレッドで実行"""
+        # Blenderのメインスレッドで実行するためのキュー
+        return_value = None
+        exception = None
+        execution_completed = False
+        
+        def wrapper():
+            nonlocal return_value, exception, execution_completed
+            try:
+                return_value = func()
+            except Exception as e:
+                exception = e
+            finally:
+                execution_completed = True
+        
+        # Blenderのタイマーを使用してメインスレッドで実行
+        bpy.app.timers.register(wrapper)
+        
+        # 実行完了を待機
+        max_wait_time = 10.0  # 10秒のタイムアウト
+        start_time = time.time()
+        
+        while bpy.app.timers.is_registered(wrapper):
+            time.sleep(0.01)
+            # タイムアウトチェック
+            if time.time() - start_time > max_wait_time:
+                logger.warning(f"メインスレッド実行がタイムアウトしました（{max_wait_time}秒）")
+                # タイマーを強制キャンセル
+                if bpy.app.timers.is_registered(wrapper):
+                    bpy.app.timers.unregister(wrapper)
+                break
+        
+        # 実行完了フラグの確認
+        if not execution_completed:
+            logger.warning("メインスレッド実行が完了していない可能性があります")
+        
+        # 例外があれば再送出
+        if exception:
+            raise exception
+        
+        return return_value
+    
+    def _get_uptime(self):
+        """サーバーの稼働時間を取得"""
+        # サーバー起動時間は記録していないので、代わりにBlenderの起動時間を使用
+        return time.time() - bpy.app.driver_namespace.get('__time_at_startup__', time.time())
+    
+    def execute_blender_code(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Blenderのコードを実行
+        
+        Args:
+            params: パラメータ
+                - code: 実行するPythonコード
+                - save_blend: 実行前にBlendファイルを保存するかどうか
+                
+        Returns:
+            実行結果
+        """
+        code = params.get("code", "")
+        save_blend = params.get("save_blend", False)
+        
+        if not code:
+            return {"error": "コードが指定されていません"}
+        
+        try:
+            # 直接実行する方法に変更
+            logger.info("コード実行を開始します")
+            
+            # Blendファイルの保存（オプション）
+            if save_blend and bpy.data.is_saved:
+                bpy.ops.wm.save_as_mainfile(filepath=bpy.data.filepath)
+            
+            # コードを実行するためのローカル変数込み
+            locals_dict = {"result": None}
+            
+            try:
+                # コードを実行
+                exec(code, globals(), locals_dict)
+                
+                # 返り値の抽出
+                result = locals_dict.get("result", None)
+                
+                logger.info(f"コード実行が成功しました。結果: {result}")
+                
+                return {
+                    "executed": True,
+                    "result": result,
+                    "timestamp": datetime.datetime.now().isoformat()
+                }
+                
+            except Exception as e:
+                logger.error(f"コード実行中にエラーが発生: {str(e)}")
+                logger.error(traceback.format_exc())
+                
+                return {
+                    "executed": False,
+                    "error": str(e),
+                    "traceback": traceback.format_exc(),
+                    "timestamp": datetime.datetime.now().isoformat()
+                }
+                
+        except Exception as e:
+            logger.error(f"コード実行の準備中にエラーが発生: {str(e)}")
+            logger.error(traceback.format_exc())
+            
+            return {
+                "executed": False,
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+                "timestamp": datetime.datetime.now().isoformat()
+            }
+    
+    def get_logs(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        サーバーログを取得
+        
+        Args:
+            params: パラメータ
+                - lines: 取得する行数
+                
+        Returns:
+            ログデータ
+        """
+        lines = params.get("lines", 100)
+        log_path = self.log_file
+        
+        try:
+            if not os.path.exists(log_path):
+                return {
+                    "exists": False,
+                    "log_path": log_path
+                }
+            
+            with open(log_path, 'r', encoding='utf-8') as f:
+                log_lines = f.readlines()
+                # 最新のN行を取得
+                log_lines = log_lines[-lines:] if lines > 0 else log_lines
+            
+            return {
+                "exists": True,
+                "log_path": log_path,
+                "lines": log_lines,
+                "count": len(log_lines)
+            }
+        except Exception as e:
+            logger.error(f"ログ読み込みエラー: {str(e)}")
+            return {
+                "exists": True,
+                "log_path": log_path,
+                "error": str(e)
+            }
+
+
+# サーバーのグローバルインスタンス
+server = None
+
+# 実行タスクを保持するグローバル辞書
+mcp_execution_tasks = {}
+
+# タイマーベースの操作状態管理用辞書
+operation_tasks = {}
+
+def register():
+    """サーバーモジュールを登録"""
+    global server
+    logger.info("HTTPサーバーモジュールを登録中...")
+    
+    # サーバーインスタンスを作成
+    server = MCPHttpServer.get_instance()
+    
+    # Blenderのmcpコマンド関数を登録
+    server.register_function(
+        server.execute_blender_code,
+        name="execute_code",
+        examples=[
+            {
+                "code": "bpy.ops.mesh.primitive_cube_add()",
+                "save_blend": False
+            }
+        ],
+        schema={
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "実行するPythonコード"},
+                "save_blend": {"type": "boolean", "description": "実行前にBlendファイルを保存するかどうか"}
+            },
+            "required": ["code"]
+        }
+    )
+    
+    # ログ取得関数を登録
+    server.register_function(
+        server.get_logs,
+        name="get_logs",
+        examples=[
+            {"lines": 100}
+        ],
+        schema={
+            "type": "object",
+            "properties": {
+                "lines": {"type": "integer", "description": "取得する行数"}
+            }
+        }
+    )
+    
+    # コマンドシステムの登録
+    if API_AVAILABLE:
+        try:
+            from .commands.base import register_commands
+            register_commands()
+            logger.info("コマンドシステムが登録されました")
+        except ImportError as e:
+            logger.error(f"コマンドシステム登録エラー: {str(e)}")
+    
+    logger.info("HTTPサーバーモジュールの登録が完了しました")
+
+def unregister():
+    """サーバーモジュールの登録解除"""
+    global server
+    logger.info("HTTPサーバーモジュールを登録解除中...")
+    
+    # サーバーを停止
+    if server:
+        server.safe_shutdown()
+    
+    server = None
+    
+    logger.info("HTTPサーバーモジュールの登録解除が完了しました")
