@@ -1,0 +1,98 @@
+Key Files for GraphQL Schema Integration in Blender_GraphQL_MCP
+===========================================================
+
+1. Primary Files:
+
+* /Users/mymac/Blender_GraphQL_MCP/graphql/schema.py
+  - Main file that defines the GraphQL schema
+  - Contains the schema building function (build_schema)
+  - Creates all GraphQL types, queries, and mutations
+  - Performs basic validation for resolvers
+  - Imports resolver modules for implementation
+
+* /Users/mymac/Blender_GraphQL_MCP/graphql/api.py
+  - Main interface for executing GraphQL queries
+  - Contains query_blender function that processes GraphQL requests
+  - Handles errors and rebuilds schema if needed
+  - Exposed to HTTP and FastAPI servers
+
+* /Users/mymac/Blender_GraphQL_MCP/core/http_server.py
+  - Implements HTTP server for GraphQL API
+  - Handles GraphQL requests through the /graphql endpoint
+  - Uses query_blender from api.py to process requests
+  - Provides GraphiQL interface for testing queries
+
+* /Users/mymac/Blender_GraphQL_MCP/core/server.py
+  - Unified server implementation
+  - Supports multiple backends including GraphQL
+  - Creates a FastAPI server with GraphQL endpoint
+  - Line 450: Processes GraphQL requests, calling graphql_api.query_blender
+
+2. Extension Files:
+
+* /Users/mymac/Blender_GraphQL_MCP/graphql/schema_extension.py
+  - Extends the base schema with additional functionality
+  - Adds batch processing and transaction capabilities
+  - Adds LLM (Language Learning Model) specific features
+  - Adds task queue functionality when available
+
+* /Users/mymac/Blender_GraphQL_MCP/graphql/schema_optimizer.py
+  - Extends schema with performance-optimized operations
+  - Uses NumPy and Pandas for optimized mesh analysis
+  - Adds batch operations for transforms
+  - Implements advanced features like raycast, nearest objects
+
+3. Integration Points for Optimized Schema:
+
+* Line 1366-1369 in schema.py:
+  ```python
+  # バッチ処理とトランザクション機能の拡張を適用
+  try:
+      from . import schema_extension
+      schema = schema_extension.extend_schema(schema)
+      logger.info("バッチ処理とトランザクション機能を追加しました")
+  except Exception as ext_error:
+      logger.error(f"スキーマ拡張エラー: {ext_error}")
+  ```
+
+* Lines 325-326 in schema_optimizer.py:
+  ```python
+  # 最適化されたスキーマを作成
+  schema = extend_schema_with_optimized_operations(base_schema)
+  ```
+
+4. Key Processing Functions:
+
+* query_blender function in api.py (line 117):
+  ```python
+  def query_blender(query_string: str, variables: Optional[Dict[str, Any]] = None, operation_name: Optional[str] = None):
+      # This is the main function that processes GraphQL queries
+      # Takes in a query string, variables, and operation name
+      # Validates and executes the query against the schema
+      # Returns the result or error information
+  ```
+
+5. Server Endpoints:
+
+* HTTP Server GraphQL endpoint (line 328 in http_server.py):
+  ```python
+  @self.app.post("/graphql")
+  async def graphql_endpoint(request: Request):
+      # Processes GraphQL requests
+      # Extracts query, variables, and operation name from the request
+      # Calls graphql_api.query_blender to process the request
+  ```
+
+* FastAPI Server GraphQL endpoint (line 436 in server.py):
+  ```python
+  @self.app.post("/graphql")
+  async def graphql_endpoint(request: Request):
+      # Similar functionality to the HTTP server endpoint
+      # Processes GraphQL requests using graphql_api.query_blender
+  ```
+
+Key Insights:
+- The schema is defined in schema.py but extended by schema_extension.py and schema_optimizer.py
+- All GraphQL requests flow through the query_blender function in api.py
+- HTTP and FastAPI servers provide endpoints that use query_blender to process requests
+- The optimal integration point for a custom schema implementation would be in schema.py or by creating a custom extension module similar to schema_optimizer.py

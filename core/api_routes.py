@@ -41,16 +41,16 @@ session_registry = {}  # セッションID -> SessionState
 async def get_commands_catalog():
     """
     利用可能なすべてのコマンドとそのスキーマを取得
-    
+
     Returns:
         すべてのコマンドのカタログ
     """
     logger.info("コマンドカタログをリクエストされました")
-    
+
     # 登録されたすべてのコマンドを取得
     all_commands = cmd_base.get_all_commands()
     command_schemas = []
-    
+
     for command_name, command_class in all_commands.items():
         # コマンドスキーマを生成
         schema = CommandSchema(
@@ -64,7 +64,7 @@ async def get_commands_catalog():
             is_dangerous=getattr(command_class, "is_dangerous", False)
         )
         command_schemas.append(schema.to_dict())
-    
+
     # グループ別に整理
     grouped_commands = {}
     for schema in command_schemas:
@@ -72,7 +72,7 @@ async def get_commands_catalog():
         if group not in grouped_commands:
             grouped_commands[group] = []
         grouped_commands[group].append(schema)
-    
+
     # レスポンス生成
     return APIResponse.success_response(data={
         "command_count": len(command_schemas),
@@ -80,6 +80,56 @@ async def get_commands_catalog():
         "commands": command_schemas,
         "grouped_commands": grouped_commands
     }).to_dict()
+
+@router.get("/supported_addons", tags=["metadata"])
+@handle_errors()
+async def get_supported_addons():
+    """
+    サポートされているBlenderアドオンの一覧を取得
+
+    Returns:
+        サポートされているアドオンの情報
+    """
+    logger.info("サポートされているアドオン情報をリクエストされました")
+
+    try:
+        # サポートされているアドオンリストをインポート
+        from ..addons_bridge import SUPPORTED_ADDONS
+
+        # Blender Extensions Marketplaceのアドオン情報
+        extensions_info = {
+            "marketplace_url": "https://extensions.blender.org/",
+            "description": "Blender Extensions Marketplaceは、Blender用の公式アドオン配布プラットフォームです。",
+            "supported_version": "Blender 4.2以降",
+            "installation_method": "Blender 4.2以降では、Blenderの設定から直接Extensionsタブを使用してインストールできます。"
+        }
+
+        # アドオンのカテゴリ別リスト
+        categorized_addons = {
+            "standard": [addon for addon in SUPPORTED_ADDONS if not addon.startswith("VRM_") and not "_" in addon],
+            "modeling": ["simple_deform_helper", "orient_and_origin", "place_helper"],
+            "animation": ["animation_nodes"],
+            "vtuber": ["VRM_Addon_for_Blender", "mmd_tools"],
+            "materials": ["TexTools"],
+            "simulation": ["molecular_nodes"],
+            "misc": ["quick_groups"]
+        }
+
+        # レスポンス生成
+        return APIResponse.success_response(data={
+            "supported_addons": SUPPORTED_ADDONS,
+            "extensions_marketplace": extensions_info,
+            "categorized_addons": categorized_addons,
+            "blender_version_support": "4.2以降"
+        }).to_dict()
+
+    except ImportError as e:
+        logger.error(f"サポートされているアドオン情報の取得に失敗しました: {str(e)}")
+        raise MCPError(
+            message="サポートされているアドオン情報の取得に失敗しました",
+            code=ErrorCodes.INTERNAL_ERROR,
+            context={"error": str(e)}
+        )
 
 
 @router.get("/commands/{command_name}", tags=["metadata"])
@@ -120,6 +170,309 @@ async def get_command_schema(command_name: str):
     
     # レスポンス生成
     return APIResponse.success_response(data=schema.to_dict()).to_dict()
+
+
+#------------------------------------------------------------------------------
+# アドオン操作API
+#------------------------------------------------------------------------------
+
+@router.get("/addons", tags=["addons"])
+@handle_errors()
+async def get_all_addons():
+    """
+    すべてのアドオン情報を取得
+    
+    Returns:
+        すべてのアドオン情報
+    """
+    logger.info("すべてのアドオン情報をリクエストされました")
+    
+    try:
+        # アドオンコマンドをインポート
+        from .commands.addon_commands import get_all_addons as get_addons_command
+        
+        # コマンドを実行
+        result = get_addons_command()
+        
+        if result.get("status") != "success":
+            raise MCPError(
+                message=result.get("message", "アドオン情報の取得に失敗しました"),
+                code=ErrorCodes.INTERNAL_ERROR,
+                context={"error": result.get("error")}
+            )
+        
+        return APIResponse.success_response(data=result).to_dict()
+        
+    except ImportError as e:
+        logger.error(f"アドオン情報の取得に失敗しました: {str(e)}")
+        raise MCPError(
+            message="アドオン情報の取得に失敗しました",
+            code=ErrorCodes.INTERNAL_ERROR,
+            context={"error": str(e)}
+        )
+
+@router.get("/addons/{addon_name}", tags=["addons"])
+@handle_errors()
+async def get_addon_info(addon_name: str):
+    """
+    特定のアドオン情報を取得
+    
+    Args:
+        addon_name: 情報を取得するアドオン名
+        
+    Returns:
+        アドオン情報
+    """
+    logger.info(f"アドオン '{addon_name}' の情報をリクエストされました")
+    
+    try:
+        # アドオンコマンドをインポート
+        from .commands.addon_commands import get_addon_info as get_addon_command
+        
+        # コマンドを実行
+        result = get_addon_command(addon_name)
+        
+        if result.get("status") == "error":
+            raise MCPError(
+                message=result.get("message", f"アドオン '{addon_name}' の情報取得に失敗しました"),
+                code=ErrorCodes.NOT_FOUND,
+                context={"addon_name": addon_name, "error": result.get("error")}
+            )
+        
+        return APIResponse.success_response(data=result).to_dict()
+        
+    except ImportError as e:
+        logger.error(f"アドオン情報の取得に失敗しました: {str(e)}")
+        raise MCPError(
+            message="アドオン情報の取得に失敗しました",
+            code=ErrorCodes.INTERNAL_ERROR,
+            context={"error": str(e)}
+        )
+
+@router.post("/addons/{addon_name}/enable", tags=["addons"])
+@handle_errors()
+async def enable_addon(addon_name: str):
+    """
+    アドオンを有効化
+    
+    Args:
+        addon_name: 有効化するアドオン名
+        
+    Returns:
+        操作結果
+    """
+    logger.info(f"アドオン '{addon_name}' の有効化をリクエストされました")
+    
+    try:
+        # アドオンコマンドをインポート
+        from .commands.addon_commands import enable_addon as enable_addon_command
+        
+        # コマンドを実行
+        result = enable_addon_command(addon_name)
+        
+        if result.get("status") == "error":
+            raise MCPError(
+                message=result.get("message", f"アドオン '{addon_name}' の有効化に失敗しました"),
+                code=ErrorCodes.OPERATION_FAILED,
+                context={"addon_name": addon_name, "error": result.get("error")}
+            )
+        
+        return APIResponse.success_response(data=result).to_dict()
+        
+    except ImportError as e:
+        logger.error(f"アドオン操作に失敗しました: {str(e)}")
+        raise MCPError(
+            message="アドオン操作に失敗しました",
+            code=ErrorCodes.INTERNAL_ERROR,
+            context={"error": str(e)}
+        )
+
+@router.post("/addons/{addon_name}/disable", tags=["addons"])
+@handle_errors()
+async def disable_addon(addon_name: str):
+    """
+    アドオンを無効化
+    
+    Args:
+        addon_name: 無効化するアドオン名
+        
+    Returns:
+        操作結果
+    """
+    logger.info(f"アドオン '{addon_name}' の無効化をリクエストされました")
+    
+    try:
+        # アドオンコマンドをインポート
+        from .commands.addon_commands import disable_addon as disable_addon_command
+        
+        # コマンドを実行
+        result = disable_addon_command(addon_name)
+        
+        if result.get("status") == "error":
+            raise MCPError(
+                message=result.get("message", f"アドオン '{addon_name}' の無効化に失敗しました"),
+                code=ErrorCodes.OPERATION_FAILED,
+                context={"addon_name": addon_name, "error": result.get("error")}
+            )
+        
+        return APIResponse.success_response(data=result).to_dict()
+        
+    except ImportError as e:
+        logger.error(f"アドオン操作に失敗しました: {str(e)}")
+        raise MCPError(
+            message="アドオン操作に失敗しました",
+            code=ErrorCodes.INTERNAL_ERROR,
+            context={"error": str(e)}
+        )
+
+@router.post("/addons/{addon_name}/update", tags=["addons"])
+@handle_errors()
+async def update_addon(addon_name: str):
+    """
+    アドオンを更新
+    
+    Args:
+        addon_name: 更新するアドオン名
+        
+    Returns:
+        操作結果
+    """
+    logger.info(f"アドオン '{addon_name}' の更新をリクエストされました")
+    
+    try:
+        # アドオンコマンドをインポート
+        from .commands.addon_commands import update_addon as update_addon_command
+        
+        # コマンドを実行
+        result = update_addon_command(addon_name)
+        
+        if result.get("status") == "error":
+            raise MCPError(
+                message=result.get("message", f"アドオン '{addon_name}' の更新に失敗しました"),
+                code=ErrorCodes.OPERATION_FAILED,
+                context={"addon_name": addon_name, "error": result.get("error")}
+            )
+        
+        return APIResponse.success_response(data=result).to_dict()
+        
+    except ImportError as e:
+        logger.error(f"アドオン操作に失敗しました: {str(e)}")
+        raise MCPError(
+            message="アドオン操作に失敗しました",
+            code=ErrorCodes.INTERNAL_ERROR,
+            context={"error": str(e)}
+        )
+
+@router.post("/addons/install", tags=["addons"])
+@handle_errors()
+async def install_addon(file_path: str):
+    """
+    ファイルからアドオンをインストール
+    
+    Args:
+        file_path: インストールするアドオンZIPファイルのパス
+        
+    Returns:
+        操作結果
+    """
+    logger.info(f"アドオンのインストールをリクエストされました: {file_path}")
+    
+    try:
+        # アドオンコマンドをインポート
+        from .commands.addon_commands import install_addon_from_file
+        
+        # コマンドを実行
+        result = install_addon_from_file(file_path)
+        
+        if result.get("status") == "error":
+            raise MCPError(
+                message=result.get("message", "アドオンのインストールに失敗しました"),
+                code=ErrorCodes.OPERATION_FAILED,
+                context={"file_path": file_path, "error": result.get("error")}
+            )
+        
+        return APIResponse.success_response(data=result).to_dict()
+        
+    except ImportError as e:
+        logger.error(f"アドオン操作に失敗しました: {str(e)}")
+        raise MCPError(
+            message="アドオン操作に失敗しました",
+            code=ErrorCodes.INTERNAL_ERROR,
+            context={"error": str(e)}
+        )
+
+@router.post("/addons/install-from-url", tags=["addons"])
+@handle_errors()
+async def install_addon_from_url(url: str):
+    """
+    URLからアドオンをインストール
+    
+    Args:
+        url: インストールするアドオンZIPファイルのURL
+        
+    Returns:
+        操作結果
+    """
+    logger.info(f"URLからアドオンのインストールをリクエストされました: {url}")
+    
+    try:
+        # アドオンコマンドをインポート
+        from .commands.addon_commands import install_addon_from_url as install_url_command
+        
+        # コマンドを実行
+        result = install_url_command(url)
+        
+        if result.get("status") == "error":
+            raise MCPError(
+                message=result.get("message", "URLからのアドオンインストールに失敗しました"),
+                code=ErrorCodes.OPERATION_FAILED,
+                context={"url": url, "error": result.get("error")}
+            )
+        
+        return APIResponse.success_response(data=result).to_dict()
+        
+    except ImportError as e:
+        logger.error(f"アドオン操作に失敗しました: {str(e)}")
+        raise MCPError(
+            message="アドオン操作に失敗しました",
+            code=ErrorCodes.INTERNAL_ERROR,
+            context={"error": str(e)}
+        )
+
+@router.get("/addons/updates", tags=["addons"])
+@handle_errors()
+async def check_addon_updates():
+    """
+    アドオンの更新を確認
+    
+    Returns:
+        更新可能なアドオンの情報
+    """
+    logger.info("アドオンの更新確認をリクエストされました")
+    
+    try:
+        # アドオンコマンドをインポート
+        from .commands.addon_commands import check_addon_updates as check_updates_command
+        
+        # コマンドを実行
+        result = check_updates_command()
+        
+        if result.get("status") == "error":
+            raise MCPError(
+                message=result.get("message", "アドオン更新の確認に失敗しました"),
+                code=ErrorCodes.OPERATION_FAILED,
+                context={"error": result.get("error")}
+            )
+        
+        return APIResponse.success_response(data=result).to_dict()
+        
+    except ImportError as e:
+        logger.error(f"アドオン操作に失敗しました: {str(e)}")
+        raise MCPError(
+            message="アドオン操作に失敗しました",
+            code=ErrorCodes.INTERNAL_ERROR,
+            context={"error": str(e)}
+        )
 
 
 #------------------------------------------------------------------------------

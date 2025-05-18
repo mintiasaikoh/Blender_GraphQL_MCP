@@ -1,24 +1,20 @@
-schema_version = "1.0.0"
-id = "blender_json_mcp"
-version = "1.0.0"
-name = "Blender JSON MCP"
-tagline = "JSON APIサーバー (FastAPI/GraphQL)"
-maintainer = "User <user@example.com>"
-type = "add-on"
+[extension]
+id = "blender_graphql_mcp"
+version = "1.2.0"
+name = "Blender GraphQL MCP"
+tagline = "AI-powered Blender control through Model Context Protocol"
+maintainer = "Blender GraphQL MCP Team"
+license = "GPL-3.0-or-later"
+blender_version_min = "4.2.0"
 
-website = "https://github.com/mintiasaikoh/Blender_json_MCP"
-
-tags = ["Development", "API", "Network"]
-
-blender_version_min = "4.0.0"
-
-license = [
-  "SPDX:GPL-3.0-or-later",
+[requirements]
+pip = [
+    "fastapi~=0.109.0",
+    "uvicorn~=0.25.0",
+    "strawberry-graphql~=0.232.2",
+    "pydantic>=2.4.0",
+    "aiofiles~=23.2.1",
+    "websockets~=12.0",
+    "numpy>=1.21.0",
+    "pandas>=1.3.0"
 ]
-copyright = [
-  "2025 User",
-]
-
-[permissions]
-network = "JSON APIサーバーの実行とネットワーク通信"
-files = "ログファイルの保存と読み込み"

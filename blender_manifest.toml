@@ -1,0 +1,66 @@
+# Blender Extension Manifest
+# https://docs.blender.org/manual/en/4.2/extensions/index.html
+
+id = "blender_graphql_mcp"
+schema_version = "1.0.0"
+
+name = "Blender GraphQL MCP"
+tagline = "AI-powered Blender control through Model Context Protocol"
+version = "1.2.0"
+blender_version_min = "4.2.0"
+blender_version_max = ""  # No upper limit
+
+type = "add-on"
+license = "GPL-3.0-or-later"
+
+maintainer = "Blender GraphQL MCP Team"
+website = "https://github.com/user/blender-graphql-mcp"
+tags = ["Development", "Interface", "AI", "MCP", "GraphQL"]
+
+# Files to include
+[build]
+paths = [
+    "__init__.py",
+    "core/**/*.py",
+    "graphql/**/*.py", 
+    "ui/**/*.py",
+    "utils/**/*.py",
+    "preferences/**/*.py",
+    "blender_mcp_addon/**/*.py",
+    "extension.toml",
+    "requirements.txt"
+]
+paths_exclude = [
+    "**/__pycache__",
+    "**/*.pyc",
+    "**/test_*",
+    "**/tests/**",
+    "**/demo/**",
+    "**/docs/**"
+]
+
+[permissions]
+files = "read,write"
+python = "enable-wheel"  # Allow pip installs
+network = "allow"  # For HTTP/GraphQL server
+
+# Python dependencies
+[[wheels]]
+wheel = "fastapi~=0.109.0"
+
+[[wheels]]
+wheel = "uvicorn~=0.25.0"
+
+[[wheels]]
+wheel = "strawberry-graphql~=0.232.2"
+
+[[wheels]]
+wheel = "aiofiles~=23.2.1"
+
+[[wheels]]
+wheel = "websockets~=12.0"
+
+# Metadata
+[details]
+support = "community"
+developer_url = "https://github.com/user/blender-graphql-mcp"

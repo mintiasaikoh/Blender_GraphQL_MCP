@@ -132,7 +132,7 @@ def check_dependencies() -> Dict[str, bool]:
     
     # graphql
     try:
-        import graphql
+        import tools
         dependencies["graphql"] = True
         logger.info(f"graphql-core利用可: バージョン {graphql.__version__}")
     except ImportError:

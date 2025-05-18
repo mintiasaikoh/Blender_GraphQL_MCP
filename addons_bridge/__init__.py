@@ -9,13 +9,26 @@ from typing import Dict, List, Any, Optional, Union, Callable
 
 # 連携可能なアドオンリスト
 SUPPORTED_ADDONS = [
-    "animation_nodes",
-    "geometry_nodes",
-    "blender_gpt",
-    "rigify",
-    "node_wrangler",
-    "blender_mcp",  # 古いバージョンとの互換性
-    "blender_llm_bridge"  # 古いバージョンとの互換性
+    # Blender標準/組み込みアドオン（追加インストール不要）
+    "geometry_nodes",  # Blender 2.92以降標準搭載
+    "mesh_tools",      # メッシュ編集ツール
+    "node_wrangler",   # ノードエディタ機能拡張
+
+    # Blender Extensions Marketplace (https://extensions.blender.org/)から入手可能なアドオン
+    "simple_deform_helper", # 変形補助ツール
+    "orient_and_origin",    # 選択基準の方向と原点設定
+    "mmd_tools",            # MMDモデル操作ツール
+    "molecular_nodes",      # 分子構造生成
+    "place_helper",         # オブジェクト配置ヘルパー
+    "quick_groups",         # インスタンスグループ作成
+
+    # 将来の連携可能性（Blender Extensions Marketplace対応予定）
+    "one_click_damage",     # オブジェクト損傷効果
+    "retopoflow",           # リトポロジーツール
+    "auto_rig_pro",         # 自動リギングシステム
+
+    # その他の互換アドオン
+    "animation_nodes"
 ]
 
 # アドオン機能マッピング

@@ -6,6 +6,7 @@
 import bpy
 import traceback
 import json
+import time
 from typing import Dict, Any, List, Optional, Callable, Type
 
 # コマンド登録用の辞書
@@ -228,6 +229,7 @@ def execute_command(command_data: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         実行結果
     """
+    start_time = time.time()
     command_name = command_data.get("command")
     params = command_data.get("params", {})
     
@@ -235,14 +237,18 @@ def execute_command(command_data: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "success": False,
             "errors": ["コマンド名が指定されていません"],
-            "result": None
+            "result": None,
+            "execution_time_ms": round((time.time() - start_time) * 1000, 2)
         }
     
     # 標準コマンドを確認
     command_class = get_command(command_name)
     if command_class:
         command = command_class()
-        return command.run(params)
+        result = command.run(params)
+        # 実行時間を追加
+        result["execution_time_ms"] = round((time.time() - start_time) * 1000, 2)
+        return result
     
     # プラグインコマンドを確認
     plugin_command = get_plugin_command(command_name)
@@ -259,7 +265,9 @@ def execute_command(command_data: Dict[str, Any]) -> Dict[str, Any]:
             # 成功情報を追加
             if "success" not in result:
                 result["success"] = True
-                
+            
+            # 実行時間を追加
+            result["execution_time_ms"] = round((time.time() - start_time) * 1000, 2)
             return result
         except Exception as e:
             error_msg = f"プラグインコマンド '{command_name}' の実行中にエラーが発生: {str(e)}"
@@ -277,7 +285,8 @@ def execute_command(command_data: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "success": False,
         "errors": [f"コマンド '{command_name}' は登録されていません"],
-        "result": None
+        "result": None,
+        "execution_time_ms": round((time.time() - start_time) * 1000, 2)
     }
 
 

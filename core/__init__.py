@@ -136,14 +136,37 @@ except ImportError as e:
     
 # 互換性のためのレガシーモジュール（利用可能であれば）
 try:
-    from . import helpers
-    from . import api
+    try:
+        from . import helpers
+        HELPERS_LOADED = True
+    except ImportError:
+        HELPERS_LOADED = False
+        logger.debug("ヘルパーモジュールをロードできませんでした")
+    
+    # セキュアなAPIモジュールを優先的に使用
+    try:
+        from . import api_handlers_secure as api
+        logger.info("セキュアなAPIモジュールを読み込みました")
+    except ImportError:
+        from . import api
+        logger.warning("従来のAPIモジュールを読み込みました")
+    
     from . import http_server
+    
+    # セキュアなメタコマンドモジュールを優先的に使用
+    try:
+        from . import meta_commands_secure
+        logger.info("セキュアなメタコマンドモジュールを読み込みました")
+    except ImportError:
+        from . import meta_commands
+        logger.warning("従来のメタコマンドモジュールを読み込みました")
+    
     from . import command_handler
     LEGACY_MODULES_LOADED = True
     API_LOADED = True
     HTTP_SERVER_LOADED = True
 except ImportError as e:
+    HELPERS_LOADED = False
     LEGACY_MODULES_LOADED = False
     API_LOADED = False
     HTTP_SERVER_LOADED = False

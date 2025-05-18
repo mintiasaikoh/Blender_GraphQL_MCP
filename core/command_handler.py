@@ -14,6 +14,9 @@ logger = logging.getLogger(__name__)
 # モジュールの動的インポート用の辞書
 _module_cache = {}
 
+# 安全なコマンドシステムを使用するかどうか
+USE_SECURE_COMMAND_SYSTEM = True
+
 def get_module(module_name: str):
     """
     モジュールを動的にインポートまたはキャッシュから取得
@@ -36,6 +39,24 @@ def get_module(module_name: str):
     except ImportError as e:
         logger.error(f"Failed to import module {module_name}: {str(e)}")
         return None
+
+# 安全なコマンドシステムのインポートを試みる
+try:
+    from .commands.secure_command_handler import execute_safe_command
+    SECURE_COMMAND_SYSTEM_LOADED = True
+    logger.info("安全なコマンドシステムを読み込みました")
+except ImportError as e:
+    SECURE_COMMAND_SYSTEM_LOADED = False
+    logger.warning(f"安全なコマンドシステムの読み込みに失敗しました: {str(e)}")
+
+# 安全なコード実行システムのインポートを試みる
+try:
+    from .secure_code_executor import handle_execute_code_command_secure
+    SECURE_CODE_EXECUTOR_LOADED = True
+    logger.info("安全なコード実行システムを読み込みました")
+except ImportError as e:
+    SECURE_CODE_EXECUTOR_LOADED = False
+    logger.warning(f"安全なコード実行システムの読み込みに失敗しました: {str(e)}")
 
 def handle_command(command_data: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -68,6 +89,92 @@ def handle_command(command_data: Dict[str, Any]) -> Dict[str, Any]:
             }
         }
     
+    # execute_code コマンドの場合は安全なコード実行を使用
+    if command_type == "execute_code" and SECURE_CODE_EXECUTOR_LOADED:
+        try:
+            # 安全なコード実行
+            result = handle_execute_code_command_secure(command_data)
+            
+            # 結果形式の変換（後方互換性のため）
+            if "success" in result:
+                # 新形式から旧形式へ変換
+                status = "success" if result["success"] else "error"
+                if not result["success"] and "error" in result:
+                    message = result["error"]
+                else:
+                    message = "Code executed successfully"
+                
+                # 結果を旧形式に合わせる
+                converted_result = {
+                    "status": status,
+                    "message": message
+                }
+                
+                # 詳細情報があれば追加
+                if "details" in result:
+                    converted_result["details"] = result["details"]
+                
+                return converted_result
+            
+            return result
+        except Exception as e:
+            logger.error(f"安全なコード実行中にエラーが発生しました: {str(e)}")
+            # エラーが発生した場合はレガシーハンドラーにフォールバック
+            logger.info("レガシーのコード実行ハンドラーにフォールバックします")
+    
+    # 安全なコマンドシステムを使用する場合
+    if USE_SECURE_COMMAND_SYSTEM and SECURE_COMMAND_SYSTEM_LOADED:
+        # 新しい形式 (command + params) に変換
+        if "params" not in command_data:
+            # 基本パラメータをコピー
+            params = command_data.copy()
+            # コマンド名は削除
+            if "command" in params:
+                del params["command"]
+            # 新しい形式にする
+            secure_command_data = {
+                "command": command_type,
+                "params": params
+            }
+        else:
+            # すでに新しい形式の場合はそのまま使用
+            secure_command_data = command_data
+        
+        # 安全なコマンド実行を試みる
+        try:
+            result = execute_safe_command(secure_command_data)
+            
+            # 結果形式の変換（後方互換性のため）
+            if "success" in result:
+                # 新形式から旧形式へ変換
+                status = "success" if result["success"] else "error"
+                if not result["success"] and "error" in result:
+                    message = result["error"]
+                else:
+                    message = f"Command {command_type} executed"
+                
+                # 結果を旧形式に合わせる
+                converted_result = {
+                    "status": status,
+                    "message": message
+                }
+                
+                # 詳細情報があれば追加
+                if "result" in result:
+                    converted_result["details"] = result["result"]
+                elif "details" in result:
+                    converted_result["details"] = result["details"]
+                
+                return converted_result
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"安全なコマンド実行中にエラーが発生しました ({command_type}): {str(e)}")
+            # エラーが発生した場合はレガシーハンドラーにフォールバック
+            logger.info(f"レガシーハンドラーにフォールバックします: {command_type}")
+    
+    # レガシーコマンド実行（フォールバック）
     # コマンドタイプに基づいてハンドラーを選択
     handlers = {
         # 基本操作

@@ -195,35 +195,40 @@ def install_package(package_name: str, version: Optional[str] = None) -> bool:
     """
     try:
         import subprocess
-        
+        import re
+
         # ユーザーのPython環境にインストールする
         pip_path = CONFIG.get("dependencies", {}).get("pip_path", "pip")
-        
-        # バージョン指定があれば追加
-        package_spec = package_name
+
+        # バージョン指定があれば追加 - 安全性フィルターを適用
+        # まずパッケージ名が有効か確認
+        if not re.match(r'^[a-zA-Z0-9_\-\.]+$', package_name):
+            logger.error(f"無効なパッケージ名: {package_name}")
+            return False
+
+        # バージョン指定があれば確認
+        if version and not re.match(r'^[a-zA-Z0-9_\-\.]+$', version):
+            logger.error(f"無効なバージョン形式: {version}")
+            return False
+
+        # コマンドを整理
+        cmd = [pip_path, "install", "--user"]
+
         if version:
-            package_spec = f"{package_name}=={version}"
-        
-        logger.info(f"パッケージ {package_spec} をインストールしています...")
-        
-        # システムの判定
-        if platform.system() == "Windows":
-            # Windowsではシェル=Trueが必要
-            result = subprocess.run(
-                [pip_path, "install", "--user", package_spec],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                shell=True
-            )
+            cmd.append(f"{package_name}=={version}")
         else:
-            # macOS/Linux
-            result = subprocess.run(
-                [pip_path, "install", "--user", package_spec],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
+            cmd.append(package_name)
+
+        logger.info("パッケージをインストールしています: " + package_name + ("バージョン" + version if version else ""))
+
+        # 全てのシステムでshell=Falseを使用して安全性を高める
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            shell=False  # どのシステムでもシェルを使用しない
+        )
         
         if result.returncode == 0:
             logger.info(f"パッケージ {package_spec} のインストールに成功しました")

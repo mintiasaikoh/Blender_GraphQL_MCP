@@ -1,17 +1,17 @@
 """
-Blender GraphQL MCP Addon
-GraphQLを使用したBlender APIサーバーを提供します
+Blender MCP Tools
+LLM（AI）がBlenderを操作するためのツールセット
 """
 
 bl_info = {
-    "name": "Blender GraphQL MCP",
-    "author": "User",
-    "version": (1, 0, 0),
-    "blender": (4, 0, 0),  # Blender 4.x互換性
+    "name": "Blender MCP Tools",
+    "author": "Blender MCP Tools Team",
+    "version": (1, 2, 0),
+    "blender": (4, 2, 0),  # Blender 4.2以降互換性
     "location": "View3D > Sidebar > MCP",
-    "description": "GraphQL APIサーバー",
+    "description": "AI-powered Blender control through Model Context Protocol",
     "warning": "",
-    "doc_url": "",
+    "doc_url": "https://github.com/user/blender-mcp-tools",
     "category": "Development",
     "support": "COMMUNITY"
 }
@@ -28,7 +28,66 @@ from datetime import datetime
 # ロギング設定
 # ユーザーホームディレクトリにログファイルを作成
 home_dir = os.path.expanduser("~")
-log_file = os.path.join(home_dir, "blender_graphql_mcp_server.log")
+logs_dir = os.path.join(home_dir, "blender_graphql_mcp_logs")
+
+# ログディレクトリが存在しない場合は作成
+if not os.path.exists(logs_dir):
+    os.makedirs(logs_dir, exist_ok=True)
+
+# 現在の日時をログファイル名に使用
+current_time = datetime.now().strftime('%Y%m%d_%H%M%S')
+log_file = os.path.join(logs_dir, f"blender_graphql_mcp_{current_time}.log")
+
+# 最新のログファイルへのシンボリックリンク（相対パスでアクセスするため）
+latest_log_file = os.path.join(logs_dir, "latest.log")
+
+# シンボリックリンクを更新（可能な場合）
+try:
+    if os.path.exists(latest_log_file):
+        os.remove(latest_log_file)
+    
+    # Windowsの場合はsymlinkの代わりにハードリンク（またはコピー）を使用
+    if sys.platform == 'win32':
+        # Windowsではハードリンクが失敗する可能性があるためコピーで対応
+        import shutil
+        def update_latest_log():
+            if os.path.exists(log_file):
+                if os.path.exists(latest_log_file):
+                    os.remove(latest_log_file)
+                shutil.copy2(log_file, latest_log_file)
+        
+        # 遅延実行（ファイル作成後）
+        import threading
+        threading.Timer(1.0, update_latest_log).start()
+    else:
+        # Unix系OSではシンボリックリンクを使用
+        os.symlink(os.path.basename(log_file), latest_log_file)
+except Exception as e:
+    print(f"最新ログファイルのリンク作成に失敗: {e}")
+
+# ログローテーション（古いログファイルを削除）
+def cleanup_old_logs(logs_dir, max_logs=10):
+    try:
+        log_files = [f for f in os.listdir(logs_dir) 
+                    if f.startswith("blender_graphql_mcp_") and f.endswith(".log")]
+        
+        # 日付順にソートして古いものを特定
+        log_files.sort(reverse=True)  # 最新のログが先頭
+        
+        # 最大数を超えるログファイルを削除
+        if len(log_files) > max_logs:
+            for old_file in log_files[max_logs:]:
+                try:
+                    old_path = os.path.join(logs_dir, old_file)
+                    os.remove(old_path)
+                    print(f"古いログファイルを削除: {old_path}")
+                except:
+                    pass
+    except Exception as e:
+        print(f"ログクリーンアップエラー: {e}")
+
+# 古いログを掃除
+cleanup_old_logs(logs_dir)
 
 # ロガー設定
 logging.basicConfig(
@@ -39,10 +98,11 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("blender_graphql_mcp.init")
 
 # ログファイルの場所を記録
-logger.info(f"ログファイル: {log_file}")
+logger.info(f"ログファイルディレクトリ: {logs_dir}")
+logger.info(f"現在のログファイル: {log_file}")
 logger.info(f"アドオン起動: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 # サードパーティ依存関係の管理
@@ -51,137 +111,45 @@ def ensure_dependencies():
     import bpy
     import os
     import sys
-    import subprocess
-    
+
     logger.info("\n" + "="*50)
     logger.info(f"依存関係チェック開始: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info(f"Blenderバージョン: {bpy.app.version_string}")
     logger.info(f"Pythonバージョン: {sys.version}")
     logger.info("="*50)
-    
-    # 依存ライブラリのインポート確認
-    dependencies = {
-        'graphql-core': None
-    }
-    
-    # Pythonパッケージ・インストール用の関数
-    def ensurepip():
-        """必要ならpipをインストールする"""
-        try:
-            import pip
-            logger.info("pipは既に利用可能です")
-            return True
-        except ImportError as e:
-            logger.warning(f"pipのインポートに失敗しました: {e}")
-            try:
-                logger.info("ensurepipを使用してpipをインストールしています...")
-                import ensurepip
-                ensurepip.bootstrap()
-                os.environ.pop("PIP_REQ_TRACKER", None)  # Reset the pip internal trackers
-                logger.info("pipのインストールに成功しました")
-                return True
-            except Exception as e:
-                logger.error(f"pipのインストールに失敗しました: {e}")
-                logger.error(traceback.format_exc())
-                return False
-    
-    # アドオンパスとvendorパスを追加
-    addon_path = os.path.dirname(os.path.abspath(__file__))
-    vendor_path = os.path.join(addon_path, "vendor")
-    if not os.path.exists(vendor_path):
-        os.makedirs(vendor_path)
-        logger.info(f"vendorディレクトリを作成しました: {vendor_path}")
-    
-    # パスをPythonパスに追加
-    for path in [addon_path, vendor_path]:
-        if path not in sys.path:
-            sys.path.insert(0, path)
-            logger.info(f"パスをPythonパスに追加: {path}")
-    
-    # importlibのキャッシュをリセット
-    importlib.invalidate_caches()
-    
-    # 依存関係のチェック
-    missing = []
-    for package, version in dependencies.items():
-        try:
-            module_name = package.replace('-', '_')
-            module = __import__(module_name)
-            logger.info(f"{package} は正常にインポートされました。バージョン: {getattr(module, '__version__', '不明')}")
-        except ImportError as e:
-            logger.warning(f"{package} のインポートに失敗しました: {e}")
-            missing.append((package, version))
-        except Exception as e:
-            logger.error(f"{package} のインポート中に予期しないエラーが発生しました: {e}")
-            logger.error(traceback.format_exc())
-            missing.append((package, version))
-    
-    # 依存関係のインストール
-    if missing:
-        logger.info(f"\n{len(missing)}個の依存関係が不足しています：{missing}")
-        
-        # pip確認
-        if ensurepip():
-            import pip
-            logger.info("pipが利用可能です。必要な依存関係をインストールします...")
-            
-            # 各パッケージをインストール
-            for package, version in missing:
-                package_spec = f"{package}=={version}" if version else package
-                
-                try:
-                    logger.info(f"{package}をインストール中...")
-                    cmd = [sys.executable, "-m", "pip", "install", f"--target={vendor_path}", package_spec]
-                    logger.debug(f"実行コマンド: {' '.join(cmd)}")
-                    
-                    result = subprocess.run(
-                        cmd,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True
-                    )
-                    
-                    if result.returncode == 0:
-                        logger.info(f"{package}のインストールに成功しました")
-                        logger.debug(f"stdout: {result.stdout}")
-                    else:
-                        logger.error(f"{package}のインストールに失敗しました。リターンコード: {result.returncode}")
-                        logger.error(f"stdout: {result.stdout}")
-                        logger.error(f"stderr: {result.stderr}")
-                except Exception as e:
-                    logger.error(f"{package}のインストール中に例外が発生しました: {e}")
-                    logger.error(traceback.format_exc())
-            
-            # 再度インポートキャッシュをクリア
-            importlib.invalidate_caches()
+
+    # Blender 4.2以降のバージョンチェック
+    from core.blender_version_utils import check_minimum_blender_version
+    if not check_minimum_blender_version():
+        logger.error("Blender GraphQL MCPはBlender 4.2以降のみをサポートしています")
+        return False
+
+    # Extensionsシステム利用可能性の確認
+    from core.blender_version_utils import is_extensions_system_available
+    if not is_extensions_system_available():
+        logger.error("Blender ExtensionsシステムがBlender 4.2で利用できません。これは予期しないエラーです。")
+        return False
+
+    # 依存関係管理モジュールをインポート
+    try:
+        # 依存関係管理システムをインポート
+        from core.dependency_manager import ensure_dependencies as ensure_deps
+        logger.info("Extensions依存関係管理システムを使用します")
+        result = ensure_deps()
+        if result:
+            logger.info("依存関係管理が正常に完了しました")
+            # アドオンディレクトリをPythonパスに追加
+            addon_path = os.path.dirname(os.path.abspath(__file__))
+            if addon_path not in sys.path:
+                sys.path.insert(0, addon_path)
+                logger.info(f"アドオンパスをPythonパスに追加: {addon_path}")
+                importlib.invalidate_caches()
         else:
-            logger.error("pipがインストールされていません。手動で依存関係をインストールしてください。")
-            return False
-    
-    # 再度依存関係をチェック
-    logger.info("再度依存関係をチェックしています...")
-    missing_after = []
-    for package, version in dependencies.items():
-        try:
-            module_name = package.replace('-', '_')
-            module = __import__(module_name)
-            logger.info(f"{package} は正常にインポートされました。バージョン: {getattr(module, '__version__', '不明')}")
-        except ImportError as e:
-            logger.warning(f"{package} の再インポートに失敗しました: {e}")
-            missing_after.append(package)
-        except Exception as e:
-            logger.error(f"{package} の再インポート中に予期しないエラーが発生しました: {e}")
-            logger.error(traceback.format_exc())
-            missing_after.append(package)
-    
-    if missing_after:
-        logger.error(f"依然として{len(missing_after)}個の依存関係が不足しています: {missing_after}")
-        # 不足している依存関係があっても進めることを許可
-        logger.warning("不足している依存関係がありますが、進行を試みます...")
-        return True
-    
-    logger.info("すべての依存関係が正常にインストールされています。")
-    return True
+            logger.warning("依存関係管理で問題が発生しました")
+        return result
+    except ImportError as e:
+        logger.error(f"依存関係管理システムをインポートできません: {e}")
+        return False
 
 # 依存関係を確認
 DEPENDENCIES_AVAILABLE = ensure_dependencies()
@@ -199,7 +167,7 @@ class MCPAddonPreferences(bpy.types.AddonPreferences):
     server_port: bpy.props.IntProperty(
         name="サーバーポート",
         description="サーバーが使用するポート番号",
-        default=8765,
+        default=8000,
         min=1024,
         max=65535
     )
@@ -290,8 +258,24 @@ class MCP_OT_start_server(bpy.types.Operator):
     bl_label = "GraphQL APIサーバー起動"
     
     def execute(self, context):
-        # 依存関係チェックを実行するが、失敗してもサーバー起動を試みる
-        ensure_dependencies()
+        # エラーハンドラをインポート（存在すれば）
+        error_handler = None
+        try:
+            from .utils import error_handler
+        except ImportError:
+            logger.warning("エラーハンドラモジュールをインポートできません")
+        
+        # 依存関係チェック
+        deps_result = ensure_dependencies()
+        if not deps_result:
+            logger.warning("依存関係が不足していますが、サーバー起動を試みます")
+            # エラーハンドラを使用してエラーログを記録（オプション）
+            if 'error_handler' in locals() and error_handler:
+                error_handler.log_error(
+                    "依存関係エラー", 
+                    "一部の依存関係が不足しています。サーバー機能が制限される可能性があります。",
+                    context_info={"dependencies_check": "failed"}
+                )
         
         # アドオン設定からポートとホストを取得
         prefs = context.preferences.addons[__name__].preferences
@@ -307,18 +291,131 @@ class MCP_OT_start_server(bpy.types.Operator):
                     area.tag_redraw()
                 return {'FINISHED'}
             
+            # ポートが使用可能か確認
+            port_available = True
+            try:
+                import socket
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(1)
+                result = s.connect_ex(("127.0.0.1", port))
+                s.close()
+                
+                if result == 0:  # ポートが既に使用中
+                    port_available = False
+                    
+                    # 自動ポート割り当て機能
+                    # 10個のポートを順番に試す
+                    available_port = None
+                    for test_port in range(port + 1, port + 11):
+                        try:
+                            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            s.settimeout(1)
+                            result = s.connect_ex(("127.0.0.1", test_port))
+                            s.close()
+                            if result != 0:  # ポートが使用可能
+                                available_port = test_port
+                                break
+                        except:
+                            continue
+                    
+                    if available_port:
+                        # 利用可能なポートがあれば使用
+                        port = available_port
+                        logger.info(f"ポート {port - 1} は既に使用中です。代わりにポート {port} を使用します。")
+                        # 設定もアップデート
+                        prefs.server_port = port
+                    else:
+                        # 適切なポートが見つからない場合
+                        if 'error_handler' in locals() and error_handler:
+                            error_handler.handle_error(
+                                "ポート使用中エラー",
+                                f"ポート {port} は既に使用中で、利用可能なポートが見つかりませんでした。",
+                                context_info={"port": port, "host": host}
+                            )
+                        
+                        self.report({'ERROR'}, f"ポート {port} は既に使用中で、代替ポートが見つかりませんでした。設定から別のポートを指定してください。")
+                        return {'CANCELLED'}
+            except Exception as port_check_error:
+                # ポートチェックエラーはログに記録するが、処理は継続
+                logger.warning(f"ポート確認中にエラーが発生しました: {port_check_error}")
+            
             # 指定されたポートとホストでサーバー起動
+            logger.info(f"サーバーを起動します: {host}:{port}")
             success = server_adapter.start_server(host=host, port=port)
             
             if success:
+                # 成功を報告
                 self.report({'INFO'}, f"サーバーを起動しました: {host}:{port}")
+                
                 # UIの更新を強制する
                 for area in context.screen.areas:
                     area.tag_redraw()
+                    
+                # ヘルスチェックタイマーを設定（サーバーの状態監視）
+                def health_check_timer():
+                    """サーバー状態を定期的に確認し、必要であれば回復する"""
+                    try:
+                        if 'server_adapter' in globals():
+                            # サーバーが実行中フラグだが、接続テストに失敗する場合は再起動を試みる
+                            is_running_flag = server_adapter.is_server_running()
+                            
+                            # 実際の接続テスト
+                            connection_alive = False
+                            try:
+                                import socket
+                                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                                s.settimeout(1)
+                                s.connect(("127.0.0.1", port))
+                                s.close()
+                                connection_alive = True
+                            except:
+                                connection_alive = False
+                            
+                            # 不一致の検出と回復
+                            if is_running_flag and not connection_alive:
+                                logger.warning("サーバーが予期せず停止しています。再起動を試みます...")
+                                server_adapter.stop_server()  # 一旦停止処理
+                                import time
+                                time.sleep(1)
+                                # 再起動
+                                success = server_adapter.start_server(host=host, port=port)
+                                if success:
+                                    logger.info("サーバーの自動再起動に成功しました")
+                                else:
+                                    logger.error("サーバーの自動再起動に失敗しました")
+                                    # エラーログを記録
+                                    if 'error_handler' in locals() and error_handler:
+                                        error_handler.log_error(
+                                            "サーバー再起動エラー", 
+                                            "サーバーの自動再起動に失敗しました",
+                                            context_info={"port": port, "host": host}
+                                        )
+                    except Exception as e:
+                        logger.error(f"ヘルスチェックエラー: {e}")
+                    
+                    return 30.0  # 30秒ごとに実行
+                
+                # ヘルスチェックタイマーを登録（既存のタイマーがあれば削除）
+                if hasattr(bpy.app, 'timers'):
+                    for timer in bpy.app.timers.get_list():
+                        if timer.__name__ == health_check_timer.__name__:
+                            bpy.app.timers.unregister(timer)
+                    bpy.app.timers.register(health_check_timer)
+                
                 return {'FINISHED'}
             else:
-                # エラーメッセージをログから取得する
-                self.report({'ERROR'}, "サーバーの起動に失敗しました。ログを確認してください。")
+                # エラーハンドラがある場合は使用
+                if 'error_handler' in locals() and error_handler:
+                    error_info = error_handler.handle_error(
+                        "サーバー起動エラー", 
+                        "GraphQL APIサーバーの起動に失敗しました。",
+                        context_info={"port": port, "host": host}
+                    )
+                    self.report({'ERROR'}, error_info["error_message"].split('\n')[0])
+                else:
+                    # エラーハンドラがない場合のフォールバック
+                    self.report({'ERROR'}, "サーバーの起動に失敗しました。ログを確認してください。")
+                
                 return {'CANCELLED'}
                 
         except Exception as e:
@@ -326,7 +423,20 @@ class MCP_OT_start_server(bpy.types.Operator):
             error_message = str(e)
             logger.error(f"サーバー起動エラー: {error_message}")
             logger.error(traceback.format_exc())
-            self.report({'ERROR'}, f"サーバー起動エラー: {error_message}")
+            
+            # エラーハンドラがある場合は使用
+            if 'error_handler' in locals() and error_handler:
+                error_info = error_handler.handle_error(
+                    "サーバー起動エラー", 
+                    error_message,
+                    error_obj=e,
+                    context_info={"port": port, "host": host}
+                )
+                self.report({'ERROR'}, error_info["error_message"].split('\n')[0])
+            else:
+                # エラーハンドラがない場合のフォールバック
+                self.report({'ERROR'}, f"サーバー起動エラー: {error_message}")
+            
             return {'CANCELLED'}
 
 class MCP_OT_stop_server(bpy.types.Operator):
@@ -335,25 +445,106 @@ class MCP_OT_stop_server(bpy.types.Operator):
     bl_label = "GraphQL APIサーバー停止"
     
     def execute(self, context):
+        # エラーハンドラをインポート（存在すれば）
+        error_handler = None
+        try:
+            from .utils import error_handler
+        except ImportError:
+            logger.warning("エラーハンドラモジュールをインポートできません")
+        
         try:
             # サーバーが起動しているか確認
             if not server_adapter.is_server_running():
                 self.report({'WARNING'}, "サーバーは既に停止しています")
                 return {'FINISHED'}
             
-            # サーバーを停止
-            server_adapter.stop_server()
-            self.report({'INFO'}, "サーバーを停止しました")
+            # ヘルスチェックタイマーを停止（存在する場合）
+            if hasattr(bpy.app, 'timers'):
+                for timer in bpy.app.timers.get_list():
+                    if timer.__name__ == 'health_check_timer':
+                        try:
+                            bpy.app.timers.unregister(timer)
+                            logger.info("ヘルスチェックタイマーを停止しました")
+                        except:
+                            pass
             
-            # UIの更新を強制する
-            for area in context.screen.areas:
-                area.tag_redraw()
+            logger.info("サーバーを停止します...")
+            
+            # サーバーを停止
+            stop_result = server_adapter.stop_server()
+            
+            if stop_result:
+                self.report({'INFO'}, "サーバーを停止しました")
                 
-            return {'FINISHED'}
+                # UIの更新を強制する
+                for area in context.screen.areas:
+                    area.tag_redraw()
+                
+                # サーバーが本当に停止したか確認
+                import socket
+                import time
+                
+                # サーバーが完全に停止するまで少し待機
+                time.sleep(1.0)
+                
+                # 接続テスト（ポートが解放されたことを確認）
+                try:
+                    # アドオン設定からポートを取得
+                    prefs = context.preferences.addons[__name__].preferences
+                    port = prefs.server_port
+                    
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(1)
+                    s.connect(("127.0.0.1", port))
+                    s.close()
+                    
+                    # まだ接続できる場合はサーバーが停止していない可能性
+                    logger.warning(f"サーバーが停止指示を受けましたが、ポート {port} への接続がまだ可能です")
+                    
+                    # エラーハンドラで記録（深刻なエラーではないので処理は続行）
+                    if 'error_handler' in locals() and error_handler:
+                        error_handler.log_error(
+                            "サーバー停止警告", 
+                            f"サーバーが停止指示を受けましたが、ポート {port} への接続がまだ可能です",
+                            context_info={"port": port}
+                        )
+                except:
+                    # 接続できない = 正常に停止している
+                    logger.info("サーバーが正常に停止したことを確認しました")
+                
+                return {'FINISHED'}
+            else:
+                # 停止に失敗
+                error_message = "サーバーの停止に失敗しました"
+                
+                # エラーハンドラで記録
+                if 'error_handler' in locals() and error_handler:
+                    error_info = error_handler.handle_error(
+                        "サーバー停止エラー", 
+                        error_message
+                    )
+                    self.report({'ERROR'}, error_info["error_message"].split('\n')[0])
+                else:
+                    self.report({'ERROR'}, error_message)
+                
+                return {'CANCELLED'}
+                
         except Exception as e:
-            self.report({'ERROR'}, f"サーバー停止エラー: {str(e)}")
-            logger.error(f"サーバー停止エラー: {str(e)}")
+            error_message = str(e)
+            logger.error(f"サーバー停止エラー: {error_message}")
             logger.error(traceback.format_exc())
+            
+            # エラーハンドラで記録
+            if 'error_handler' in locals() and error_handler:
+                error_info = error_handler.handle_error(
+                    "サーバー停止エラー", 
+                    error_message,
+                    error_obj=e
+                )
+                self.report({'ERROR'}, error_info["error_message"].split('\n')[0])
+            else:
+                self.report({'ERROR'}, f"サーバー停止エラー: {error_message}")
+            
             return {'CANCELLED'}
 
 class MCP_OT_install_dependencies(bpy.types.Operator):
@@ -390,6 +581,16 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     
+    # 標準MCP対応を登録
+    try:
+        from blender_mcp.tools.mcp_standard_integration import register as register_mcp_standard
+        register_mcp_standard()
+        logger.info("標準MCP対応を登録しました")
+    except ImportError as e:
+        logger.warning(f"標準MCP対応の登録ができませんでした: {str(e)}")
+    except Exception as e:
+        logger.error(f"標準MCP対応の登録でエラーが発生しました: {str(e)}")
+    
     # ハンドラを登録
     if hasattr(bpy.app, 'handlers') and hasattr(bpy.app.handlers, 'save_pre'):
         # save_pre ハンドラが存在する場合のみ追加
@@ -408,6 +609,16 @@ def register():
                     # サーバーを停止
                     server_adapter.stop_server()
                     print("MCPサーバーを保存前に停止しました")
+            
+            # 標準MCPサーバーも停止
+            try:
+                from blender_mcp.tools.mcp_server_manager import stop_mcp_server
+                stop_mcp_server()
+                print("標準MCPサーバーを保存前に停止しました")
+            except ImportError:
+                pass
+            except Exception as e:
+                print(f"標準MCPサーバーの停止中にエラーが発生しました: {str(e)}")
         
         # ハンドラを追加
         bpy.app.handlers.save_pre.append(mcp_save_handler)
@@ -427,13 +638,33 @@ def unregister():
                 except ValueError:
                     pass
     
-    # サーバーが起動している場合は停止
+    # 標準MCPサーバーを停止
+    try:
+        from blender_mcp.tools.mcp_server_manager import stop_mcp_server
+        stop_mcp_server()
+        print("標準MCPサーバーを停止しました")
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"標準MCPサーバーの停止中にエラーが発生しました: {str(e)}")
+    
+    # 標準MCP対応の登録解除
+    try:
+        from blender_mcp.tools.mcp_standard_integration import unregister as unregister_mcp_standard
+        unregister_mcp_standard()
+        logger.info("標準MCP対応の登録を解除しました")
+    except ImportError as e:
+        logger.warning(f"標準MCP対応の登録解除ができませんでした: {str(e)}")
+    except Exception as e:
+        logger.error(f"標準MCP対応の登録解除でエラーが発生しました: {str(e)}")
+    
+    # GraphQLサーバーが起動している場合は停止
     try:
         if 'server_adapter' in globals() and hasattr(server_adapter, 'is_server_running') and server_adapter.is_server_running():
             server_adapter.stop_server()
-            print("MCPサーバーを停止しました")
+            print("GraphQL MCPサーバーを停止しました")
     except:
-        print("MCPサーバーの停止中にエラーが発生しました")
+        print("GraphQL MCPサーバーの停止中にエラーが発生しました")
     
     # 各クラスの登録を解除
     for cls in reversed(classes):

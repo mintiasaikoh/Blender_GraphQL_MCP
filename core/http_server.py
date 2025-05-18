@@ -12,6 +12,9 @@ import time
 import json
 import traceback
 
+# Logger設定
+logger = logging.getLogger("blender_graphql_mcp.http_server")
+
 # FastAPIとUvicornをチェック
 try:
     import fastapi
@@ -21,11 +24,9 @@ try:
     from fastapi.responses import HTMLResponse, JSONResponse
     import uvicorn
     HTTP_SERVER_AVAILABLE = True
-except ImportError:
+except ImportError as e:
+    logger.error(f"FastAPIまたはUvicornのインポートに失敗しました: {e}")
     HTTP_SERVER_AVAILABLE = False
-
-# Logger設定
-logger = logging.getLogger("blender_graphql_mcp.http_server")
 
 # GraphQL関連のグローバル変数
 GRAPHQL_AVAILABLE = False
@@ -43,7 +44,7 @@ def _load_graphql_dependencies():
     
     # まず依存ライブラリがインストールされているか確認
     try:
-        import graphql
+        import tools
         logger.info(f"graphql-coreベースライブラリが利用可能です (バージョン: {getattr(graphql, '__version__', 'unknown')})")
     except ImportError as e:
         logger.error(f"graphql-coreライブラリがインストールされていません: {e}")
@@ -62,9 +63,9 @@ def _load_graphql_dependencies():
             
         # GraphQLモジュールを不具合なくインポートできるように再ロード
         import importlib
-        if 'blender_graphql_mcp.graphql.api' in sys.modules:
-            importlib.reload(sys.modules['blender_graphql_mcp.graphql.api'])
-            logger.info("blender_graphql_mcp.graphql.apiを再ロードしました")
+        if 'blender_graphql_mcp.tools.api' in sys.modules:
+            importlib.reload(sys.modules['blender_graphql_mcp.tools.api'])
+            logger.info("blender_graphql_mcp.tools.apiを再ロードしました")
             
         # GraphQLモジュールを遅延インポート
         from ..graphql import api
@@ -91,7 +92,6 @@ def _load_graphql_dependencies():
             
     except Exception as e:
         logger.error(f"GraphQL依存関係のロード中にエラーが発生しました: {e}")
-        import traceback
         logger.debug(traceback.format_exc())
         GRAPHQL_AVAILABLE = False
         return False
@@ -110,6 +110,7 @@ class MCPHttpServer:
         self.app = None  # FastAPIアプリケーションインスタンス
         self.server_thread = None  # サーバー実行スレッド
         self.is_running = False  # サーバー実行状態フラグ
+        self.stop_event = threading.Event()  # サーバー停止イベント
         self.setup_logging()  # ロギングを設定
         
     def setup_logging(self):
@@ -151,7 +152,7 @@ class MCPHttpServer:
             # FastAPIアプリを作成
             self.app = FastAPI(title="Blender GraphQL API", version="1.0.0")
             
-            # CORSミドルウェアを追加
+            # CORSミドルウェアを追加（すべてのオリジンを許可）
             self.app.add_middleware(
                 CORSMiddleware,
                 allow_origins=["*"],
@@ -159,23 +160,12 @@ class MCPHttpServer:
                 allow_methods=["*"],
                 allow_headers=["*"],
             )
-            
-            # GraphQL専用モードのミドルウェアを追加
-            @self.app.middleware("http")
-            async def graphql_only_middleware(request, call_next):
-                # GraphQL関連のパスのみを許可
-                allowed_paths = ["/", "/graphql", "/graphiql"]
-                if request.url.path not in allowed_paths:
-                    logger.warning(f"GraphQL専用モード: アクセス拒否 - {request.method} {request.url.path}")
-                    return Response(content=json.dumps({
-                        "error": "This API only accepts GraphQL requests. Please use the /graphql endpoint.",
-                        "graphql_endpoint": "/graphql",
-                        "graphiql_interface": "/graphiql"
-                    }), media_type="application/json", status_code=400)
-                return await call_next(request)
-            
+
             # ルートとルーティングを設定
             self._setup_routes()
+            
+            # 停止イベントをリセット
+            self.stop_event.clear()
             
             # 別スレッドでサーバーを起動
             self.server_thread = threading.Thread(
@@ -192,38 +182,76 @@ class MCPHttpServer:
             
         except Exception as e:
             logger.error(f"サーバー起動エラー: {e}")
-            import traceback
             logger.debug(traceback.format_exc())
             return False
     
     def stop(self) -> bool:
-        """サーバーを停止"""
+        """サーバーを効率的に停止"""
         if not self.is_running:
             logger.warning("サーバーは実行中ではありません")
             return True
-        
+
         try:
+            # まず停止イベントを設定
+            self.stop_event.set()
+
+            # サーバーインスタンスにアクセス
+            if hasattr(self, 'server_instance') and self.server_instance:
+                # 直接シャットダウン
+                logger.info("サーバーに直接シャットダウンを要求")
+                self.server_instance.should_exit = True
+                # 必要に応じてワーカーを強制終了
+                if hasattr(self.server_instance, 'force_exit'):
+                    self.server_instance.force_exit = True
+
+            # サーバースレッドの終了を待機
+            if self.server_thread and self.server_thread.is_alive():
+                logger.info("サーバースレッドの終了を待機（最大5秒）")
+                self.server_thread.join(timeout=5.0)
+
+            # インスタンス状態を更新
             self.is_running = False
-            # サーバースレッドを終了
-            # UvicornサーバーのAPIに直接アクセスする方法はないため、
-            # スレッドをデーモンとして実行し、終了時に自動的に終了します
-            logger.info("GraphQL APIサーバーを停止")
+            logger.info("GraphQL APIサーバーを停止しました")
             return True
+
         except Exception as e:
             logger.error(f"サーバー停止エラー: {e}")
+            logger.error(traceback.format_exc())
+            # エラー時も状態を更新
+            self.is_running = False
             return False
     
     def _run_server(self):
         """サーバーを起動するプライベートメソッド"""
         try:
-            uvicorn.run(
-                self.app,
+            import uvicorn
+            # uvicornサーバーを設定
+            config = uvicorn.Config(
+                app=self.app,
                 host=self.host,
                 port=self.port,
-                log_level="error"
+                log_level="info",
+                access_log=False  # アクセスログを無効化
             )
+            server = uvicorn.Server(config)
+            # サーバーインスタンスを保存
+            self.server_instance = server
+
+            # 停止イベントを別スレッドで監視
+            def monitor_stop_event():
+                self.stop_event.wait()
+                logger.info("停止イベントを検出、サーバーシャットダウンを開始します")
+                server.should_exit = True
+
+            import threading
+            stop_monitor = threading.Thread(target=monitor_stop_event, daemon=True)
+            stop_monitor.start()
+
+            # サーバーを実行
+            server.run()
         except Exception as e:
-            logger.error(f"サーバー実行エラー: {e}")
+            logger.error(f"サーバー起動中にエラーが発生しました: {e}")
+            logger.error(traceback.format_exc())
     
     def _setup_routes(self):
         """APIルートをセットアップ"""
@@ -242,12 +270,9 @@ class MCPHttpServer:
             graphql_loaded = _load_graphql_dependencies()
             logger.info(f"GraphQLロード状態: {graphql_loaded}")
 
-            # GraphQL専用モードを設定
-            logger.info("GraphQL専用モードで継続します")
-
-            # GraphiQLインターフェイスの追加
+            # GraphiQLインターフェースの追加
             try:
-                from ..graphql.graphiql import get_graphiql_html
+                from ..tools.graphiql import get_graphiql_html
                 logger.info("GraphiQLインターフェースを有効化します")
 
                 # GraphiQLインターフェースは/graphiqlパスで提供
@@ -260,7 +285,7 @@ class MCPHttpServer:
             except ImportError as e:
                 logger.warning(f"GraphiQLモジュールのインポートに失敗しました: {e}")
 
-            # 正規のGraphQLライブラリを使用したGraphQL APIエンドポイント
+            # GraphQL APIエンドポイント
             @self.app.post("/graphql")
             async def graphql_endpoint(request: Request):
                 """
@@ -275,7 +300,6 @@ class MCPHttpServer:
                     
                     # ログ記録
                     logger.info(f"GraphQLリクエスト受信: {query[:100] if query else ''}...")
-                    logger.info(f"Operation: {operation_name}, Variables: {variables}")
                     
                     # GraphQL依存関係をチェック
                     if not GRAPHQL_AVAILABLE:
@@ -287,143 +311,45 @@ class MCPHttpServer:
                     if not query:
                         return {"errors": [{"message": "queryパラメータが必要です"}]}
                     
-                    # GraphQL APIモジュールをチェック
-                    from ..graphql import api as graphql_api
-                    
-                    if not hasattr(graphql_api, 'query_blender'):
-                        error_msg = "GraphQL APIモジュールにquery_blender関数が見つかりません"
-                        logger.error(error_msg)
-                        return {"errors": [{"message": error_msg}]}
-                    
                     # GraphQLクエリを実行
-                    try:
-                        result = graphql_api.query_blender(query, variables, operation_name)
-                        
-                        # 実行結果をログに記録 (デバッグ用)
-                        logger.debug(f"GraphQLクエリ結果: {result}")
-                        
-                        # 結果を返す
-                        return JSONResponse(content=result, status_code=200)
-                    except Exception as e:
-                        # クエリ実行中のエラーをキャッチ
-                        logger.error(f"GraphQLクエリ実行エラー: {str(e)}")
-                        logger.error(traceback.format_exc())
-                        
-                        # 詳細なエラー情報を提供
-                        error_response = {
-                            "errors": [{
-                                "message": f"GraphQLクエリ実行エラー: {str(e)}",
-                                "extensions": {
-                                    "code": "EXECUTION_ERROR",
-                                    "classification": "ServerError",
-                                    "exception": {
-                                        "type": e.__class__.__name__,
-                                        "stacktrace": traceback.format_exc().split('\n')
-                                    },
-                                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
-                                }
-                            }]
-                        }
-                        return JSONResponse(content=error_response, status_code=500)
+                    from ..graphql import api as graphql_api
+                    result = graphql_api.query_blender(query, variables, operation_name)
+                    return result
                     
-                    # 結果を返す
-                    return JSONResponse(content=result, status_code=200)
                 except Exception as e:
-                    # クエリ実行中のエラーをキャッチ
+                    # エラーハンドリング
                     logger.error(f"GraphQLエンドポイントエラー: {str(e)}")
                     logger.error(traceback.format_exc())
                     
-                    # 拡張エラー情報を含むJSONレスポンス
+                    # エラーレスポンス
                     error_response = {
                         "errors": [{
                             "message": f"GraphQLエンドポイントエラー: {str(e)}",
                             "extensions": {
-                                "code": "GRAPHQL_ENDPOINT_ERROR",
-                                "classification": "ServerError",
-                                "exception": {"type": e.__class__.__name__},
-                                "path": "/graphql",
-                                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+                                "code": "GRAPHQL_ENDPOINT_ERROR"
                             }
                         }]
                     }
                     
-                    return JSONResponse(content=error_response, status_code=500)
-            
-            # GraphQLエンドポイントの設定完了をログ記録
-            logger.info("GraphQLエンドポイントを追加: /graphql")
-
-            # 旧MCPコマンドルートをJSON APIが廃止されたため削除しました
-            # GraphQL APIのみを使用してください
-            logger.info("GraphQLインターフェースのみをサポートします - JSON APIは廃止されました")
-            
+                    # GraphQL仕様に従い、エラーでも200を返す
+                    return JSONResponse(content=error_response, status_code=200)
+                    
             # エラーハンドラーの設定
-            @self.app.exception_handler(HTTPException)
-            async def http_exception_handler(request, exc):
-                # GraphQL API専用のシンプルなエラーメッセージ
-                error_content = {
-                    "error": {
-                        "code": exc.status_code,
-                        "message": str(exc.detail),
-                        "type": "HttpException"
-                    },
-                    "info": {
-                        "description": "Blender GraphQL APIでエラーが発生しました",
-                        "graphql_endpoint": "/graphql",
-                        "graphiql_interface": "/graphiql"
-                    }
-                }
-                
-                return JSONResponse(
-                    status_code=exc.status_code,
-                    content=error_content
-                )
-            
             @self.app.exception_handler(Exception)
             async def general_exception_handler(request, exc):
                 logger.error(f"サーバーエラー: {exc}")
                 
-                # GraphQL API専用のシンプルなエラーメッセージ
+                # シンプルなエラーメッセージ
                 error_content = {
-                    "error": {
-                        "code": "SERVER_ERROR",
-                        "message": str(exc),
-                        "type": exc.__class__.__name__
-                    },
-                    "info": {
-                        "description": "Blender GraphQL APIサーバーで内部エラーが発生しました",
-                        "graphql_endpoint": "/graphql",
-                        "graphiql_interface": "/graphiql"
-                    }
+                    "error": str(exc),
+                    "type": exc.__class__.__name__
                 }
                 
                 return JSONResponse(
                     content=error_content,
                     status_code=500
                 )
-        
+                
         except Exception as e:
             logger.error(f"ルート設定エラー: {e}")
-            import traceback
             logger.debug(traceback.format_exc())
-        
-        # GraphQL専用モードをログに記録
-        logger.info("GraphQL API専用モードで動作しています")
-    
-    def _run_server(self):
-        """サーバーを起動するプライベートメソッド"""
-        try:
-            import uvicorn
-            # uvicornの設定を指定してサーバーを起動
-            config = uvicorn.Config(
-                app=self.app,
-                host=self.host,
-                port=self.port,
-                log_level="info",
-                access_log=False  # アクセスログを無効化
-            )
-            server = uvicorn.Server(config)
-            server.run()
-        except Exception as e:
-            logger.error(f"サーバー起動中にエラーが発生しました: {e}")
-            import traceback
-            logger.error(traceback.format_exc())

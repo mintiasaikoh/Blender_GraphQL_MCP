@@ -137,6 +137,15 @@ class SimpleHttpServer:
             if not self._load_server():
                 logger.error("サーバーインスタンスの読み込みに失敗しました")
                 return False
+                
+        # 追加モジュールのインポート確認
+        try:
+            from .transaction import create_transaction
+            from .batch_processor import BatchProcessor
+            logger.info("拡張機能（トランザクション、バッチ処理）を読み込みました")
+        except ImportError as e:
+            logger.warning(f"拡張機能モジュールの読み込みに失敗しました: {e}")
+            pass  # オプショナル機能なので無視
         
         try:
             self.port = port
@@ -434,11 +443,43 @@ def process_main_thread_queue():
 def start_server(host="localhost", port=8765):
     """サーバーを起動するヘルパー関数"""
     server = get_server_instance()
-    return server.start_server(host=host, port=port)
+    result = server.start_server(host=host, port=port)
+    
+    # サーバー起動に成功した場合、拡張コンポーネントも起動
+    if result:
+        try:
+            from .components_initializer import initialize_components, register_sample_task_handlers
+            
+            # コンポーネント初期化
+            comp_results = initialize_components(
+                task_queue_workers=2,  # デフォルト: 2ワーカー
+                admin_server=True,     # 管理インターフェースを有効化
+                admin_port=8766        # 管理インターフェースのポート
+            )
+            
+            # サンプルタスクハンドラー登録
+            register_sample_task_handlers()
+            
+            logger.info(f"拡張コンポーネント初期化結果: {comp_results}")
+        except Exception as e:
+            logger.error(f"拡張コンポーネント初期化エラー: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+    
+    return result
 
 
 def stop_server():
     """サーバーを停止するヘルパー関数"""
+    # 拡張コンポーネントの停止を試みる
+    try:
+        from .components_initializer import shutdown_components
+        comp_results = shutdown_components()
+        logger.info(f"拡張コンポーネント停止結果: {comp_results}")
+    except Exception as e:
+        logger.error(f"拡張コンポーネント停止エラー: {e}")
+    
+    # サーバーインスタンスの停止
     server = get_server_instance()
     return server.stop()
 

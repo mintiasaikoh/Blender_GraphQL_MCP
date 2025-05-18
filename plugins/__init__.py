@@ -228,7 +228,7 @@ class PluginManager:
         
         # GraphQLシステムに登録
         try:
-            from ..graphql.schema import register_schema_extensions
+            from ..tools.definitions import register_schema_extensions
             register_schema_extensions(schema_extensions)
             logger.debug(f"プラグイン '{module_name}' のスキーマ拡張 {len(schema_extensions)} 個を登録しました")
         except ImportError as e:
@@ -244,7 +244,7 @@ class PluginManager:
         
         # GraphQLシステムから登録解除
         try:
-            from ..graphql.schema import unregister_schema_extensions
+            from ..tools.definitions import unregister_schema_extensions
             unregister_schema_extensions(plugin_schema_extensions[module_name])
             logger.debug(f"プラグイン '{module_name}' のスキーマ拡張を登録解除しました")
         except ImportError as e:

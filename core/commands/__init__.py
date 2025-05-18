@@ -9,6 +9,11 @@ import logging
 from .base import BlenderCommand, register_commands, unregister_commands, get_all_commands
 from .registry import get_registry
 
+# 各機能別コマンド
+from . import addon_commands  # アドオン操作コマンド
+from . import addon_feature_commands  # アドオン機能実行コマンド
+from . import integrated_commands  # 統合コマンド
+
 logger = logging.getLogger('unified_mcp.commands')
 
 def register():

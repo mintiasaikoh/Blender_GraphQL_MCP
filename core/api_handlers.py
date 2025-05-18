@@ -26,27 +26,28 @@ def run_in_main_thread(func):
             # すでにメインスレッドの場合は直接実行
             return func(*args, **kwargs)
         else:
-            # メインスレッドでの実行をスケジュール
-            result = []
+            # イベント駆動アプローチ（タイムアウト付き）
+            result_container = []
+            event = threading.Event()
+            
             def exec_func():
                 try:
                     with blender_lock:
-                        result.append(func(*args, **kwargs))
+                        result_container.append(func(*args, **kwargs))
                 except Exception as e:
                     logger.error(f"エラー in {func.__name__}: {str(e)}")
-                    result.append({"error": str(e)})
+                    result_container.append({"error": str(e)})
+                finally:
+                    event.set()  # 実行完了を通知
             
             bpy.app.timers.register(exec_func)
             
-            # 結果が返るまで待機（最大5秒）
+            # イベント待機（タイムアウト付き）
             timeout = 5.0
-            start_time = time.time()
-            while not result and time.time() - start_time < timeout:
-                time.sleep(0.1)
-            
-            if not result:
+            if not event.wait(timeout=timeout):
                 return {"error": f"Timeout waiting for {func.__name__} to execute"}
-            return result[0]
+            
+            return result_container[0]
     
     return wrapper
 
@@ -194,32 +195,54 @@ def get_materials_list() -> List[Dict[str, Any]]:
     return result
 
 @run_in_main_thread
-def execute_command(command: str) -> Dict[str, Any]:
+def execute_command(command_data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Blender内でPythonコマンドを実行
+    安全なコマンド実行（exec()の代わりに安全なコマンドパターンを使用）
     
     Args:
-        command: 実行するPythonコマンド文字列
-        
+        command_data: コマンドデータ
+            {
+                "command": "コマンド名",
+                "params": {パラメータ}
+            }
+            または古い形式の文字列
+            
     Returns:
         Dict: 実行結果
     """
-    try:
-        # 実行結果を格納する辞書
-        locals_dict = {}
-        
-        # コマンドをグローバルコンテキストで実行
-        exec(command, {"bpy": bpy}, locals_dict)
-        
-        # 実行結果の取得
-        if "result" in locals_dict:
-            result = locals_dict["result"]
-            if isinstance(result, (dict, list, str, int, float, bool, type(None))):
-                return {"success": True, "result": result}
+    # 文字列のコマンドをハンドリング（後方互換性）
+    if isinstance(command_data, str):
+        logger.warning("文字列形式のコマンドは非推奨です。JSONオブジェクトを使用してください。")
+        try:
+            # 文字列がJSON形式か確認
+            if command_data.strip().startswith('{'):
+                command_data = json.loads(command_data)
             else:
-                return {"success": True, "result": str(result)}
-        else:
-            return {"success": True, "message": "Command executed successfully"}
+                # 古い形式の場合は新しい形式に変換
+                return {
+                    "success": False,
+                    "error": "String commands are no longer supported. Use command object format instead.",
+                    "example": {
+                        "command": "select_object", 
+                        "params": {"object_name": "Cube"}
+                    }
+                }
+        except json.JSONDecodeError:
+            return {"success": False, "error": "Invalid command format"}
+    
+    # 安全なコマンド実行システムを使用
+    try:
+        # コマンドハンドラーをインポート
+        from .commands.secure_command_handler import execute_safe_command
+        
+        # 安全なコマンド実行
+        return execute_safe_command(command_data)
+    except ImportError:
+        logger.error("secure_command_handler モジュールが見つかりません")
+        return {
+            "success": False, 
+            "error": "Command execution system is not available"
+        }
     except Exception as e:
         logger.error(f"コマンド実行エラー: {str(e)}")
         return {"success": False, "error": str(e)}
@@ -227,7 +250,7 @@ def execute_command(command: str) -> Dict[str, Any]:
 @run_in_main_thread
 def execute_mcp_command(command_data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    MCPコマンドを実行
+    MCPコマンドを実行（execute_commandへのブリッジ）
     
     Args:
         command_data: コマンドデータ（JSON）
@@ -235,78 +258,258 @@ def execute_mcp_command(command_data: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         Dict: 実行結果
     """
-    try:
-        # コマンドハンドラーモジュールをインポート
-        from . import command_handler
-        
-        # コマンドを実行
-        result = command_handler.handle_command(command_data)
-        return result
-    except Exception as e:
-        logger.error(f"MCPコマンド実行エラー: {str(e)}")
-        return {
-            "status": "error",
-            "message": f"Command execution failed: {str(e)}",
-            "details": {
-                "exception": str(e)
-            }
-        }
+    return execute_command(command_data)
 
 def api_handler(endpoint: str, params: Dict[str, Any] = None) -> Dict[str, Any]:
     """
     APIエンドポイントに応じたハンドラー関数の呼び出し
-    
+
     Args:
         endpoint: APIエンドポイント名
         params: リクエストパラメータ
-        
+
     Returns:
         Dict: 処理結果
     """
     if params is None:
         params = {}
-    
+
     try:
         # エンドポイントに応じたハンドラーを呼び出す
         if endpoint == "scene":
             return {"status": "success", "data": get_scene_info()}
-        
+
         elif endpoint == "objects":
             collection_name = params.get("collection", None)
             return {"status": "success", "data": get_objects_list(collection_name)}
-        
+
         elif endpoint == "collections":
             return {"status": "success", "data": get_collections_list()}
-        
+
         elif endpoint == "materials":
             return {"status": "success", "data": get_materials_list()}
-        
+
         elif endpoint == "execute":
+            # 新しいコマンド形式を使用
             if "command" not in params:
-                return {"error": "Missing 'command' parameter"}
-            
+                return {"status": "error", "message": "Missing 'command' parameter"}
+
             command = params["command"]
             return execute_command(command)
-        
+
         elif endpoint == "command":
             if not params:
-                return {"error": "Missing command data"}
-            
+                return {"status": "error", "message": "Missing command data"}
+
             return execute_mcp_command(params)
-        
+
+        elif endpoint == "commands":
+            # 利用可能なコマンド一覧を返す
+            try:
+                from .commands.secure_command_handler import get_available_commands
+                return {
+                    "status": "success",
+                    "data": {
+                        "available_commands": get_available_commands()
+                    }
+                }
+            except ImportError:
+                return {
+                    "status": "error",
+                    "message": "Command listing is not available"
+                }
+
         elif endpoint == "analyze_scene":
-            # シーン分析コマンドを直接実行
-            from . import meta_commands
-            return meta_commands.handle_analyze_scene_command(params)
-        
+            # シーン分析コマンドを安全なコマンドに変換
+            return execute_command({
+                "command": "analyze_scene",
+                "params": params
+            })
+
         elif endpoint == "analyze_object":
-            # オブジェクト分析コマンドを直接実行
-            from . import meta_commands
-            return meta_commands.handle_analyze_object_command(params)
-        
+            # オブジェクト分析コマンドを安全なコマンドに変換
+            return execute_command({
+                "command": "analyze_object",
+                "params": params
+            })
+
+        elif endpoint == "supported_addons":
+            # サポートされているアドオンの一覧を返す
+            # addons_bridge/__init__.pyからSUPPORTED_ADDONSを取得
+            try:
+                from ..addons_bridge import SUPPORTED_ADDONS
+
+                # 各アドオンの状態を確認
+                addons_status = {}
+                for addon_name in SUPPORTED_ADDONS:
+                    is_enabled = addon_name in bpy.context.preferences.addons
+                    addons_status[addon_name] = {
+                        "name": addon_name,
+                        "enabled": is_enabled,
+                        "description": f"Blender Extensions Marketplace対応アドオン: {addon_name}"
+                    }
+
+                return {
+                    "status": "success",
+                    "data": {
+                        "supported_addons": SUPPORTED_ADDONS,
+                        "addons_status": addons_status,
+                        "extensions_marketplace_url": "https://extensions.blender.org/"
+                    }
+                }
+            except ImportError:
+                return {
+                    "status": "error",
+                    "message": "サポートされているアドオン情報を取得できません"
+                }
+
+        elif endpoint == "addon_info":
+            # 特定のアドオン情報を取得
+            try:
+                from .commands.addon_commands import get_addon_info
+
+                addon_name = params.get("addon_name")
+                if not addon_name:
+                    return {
+                        "status": "error",
+                        "message": "アドオン名を指定してください"
+                    }
+
+                return get_addon_info(addon_name)
+
+            except ImportError:
+                return {
+                    "status": "error",
+                    "message": "アドオン情報を取得できません"
+                }
+
+        elif endpoint == "all_addons":
+            # すべてのアドオン情報を取得
+            try:
+                from .commands.addon_commands import get_all_addons
+                return get_all_addons()
+            except ImportError:
+                return {
+                    "status": "error",
+                    "message": "アドオン情報を取得できません"
+                }
+
+        elif endpoint == "enable_addon":
+            # アドオンを有効化
+            try:
+                from .commands.addon_commands import enable_addon
+
+                addon_name = params.get("addon_name")
+                if not addon_name:
+                    return {
+                        "status": "error",
+                        "message": "アドオン名を指定してください"
+                    }
+
+                return enable_addon(addon_name)
+
+            except ImportError:
+                return {
+                    "status": "error",
+                    "message": "アドオン操作機能を使用できません"
+                }
+
+        elif endpoint == "disable_addon":
+            # アドオンを無効化
+            try:
+                from .commands.addon_commands import disable_addon
+
+                addon_name = params.get("addon_name")
+                if not addon_name:
+                    return {
+                        "status": "error",
+                        "message": "アドオン名を指定してください"
+                    }
+
+                return disable_addon(addon_name)
+
+            except ImportError:
+                return {
+                    "status": "error",
+                    "message": "アドオン操作機能を使用できません"
+                }
+
+        elif endpoint == "install_addon":
+            # アドオンをインストール
+            try:
+                from .commands.addon_commands import install_addon_from_file
+
+                file_path = params.get("file_path")
+                if not file_path:
+                    return {
+                        "status": "error",
+                        "message": "アドオンファイルパスを指定してください"
+                    }
+
+                overwrite = params.get("overwrite", True)
+                return install_addon_from_file(file_path, overwrite)
+
+            except ImportError:
+                return {
+                    "status": "error",
+                    "message": "アドオン操作機能を使用できません"
+                }
+
+        elif endpoint == "install_addon_from_url":
+            # URLからアドオンをインストール
+            try:
+                from .commands.addon_commands import install_addon_from_url
+
+                url = params.get("url")
+                if not url:
+                    return {
+                        "status": "error",
+                        "message": "アドオンURLを指定してください"
+                    }
+
+                overwrite = params.get("overwrite", True)
+                return install_addon_from_url(url, overwrite)
+
+            except ImportError:
+                return {
+                    "status": "error",
+                    "message": "アドオン操作機能を使用できません"
+                }
+
+        elif endpoint == "update_addon":
+            # アドオンを更新
+            try:
+                from .commands.addon_commands import update_addon
+
+                addon_name = params.get("addon_name")
+                if not addon_name:
+                    return {
+                        "status": "error",
+                        "message": "アドオン名を指定してください"
+                    }
+
+                return update_addon(addon_name)
+
+            except ImportError:
+                return {
+                    "status": "error",
+                    "message": "アドオン操作機能を使用できません"
+                }
+
+        elif endpoint == "check_addon_updates":
+            # アドオンの更新を確認
+            try:
+                from .commands.addon_commands import check_addon_updates
+                return check_addon_updates()
+            except ImportError:
+                return {
+                    "status": "error",
+                    "message": "アドオン操作機能を使用できません"
+                }
+
         else:
-            return {"error": f"Unknown endpoint: {endpoint}"}
-    
+            return {"status": "error", "message": f"Unknown endpoint: {endpoint}"}
+
     except Exception as e:
         logger.error(f"APIハンドラーエラー: {str(e)}")
-        return {"error": str(e)}
+        return {"status": "error", "message": str(e)}

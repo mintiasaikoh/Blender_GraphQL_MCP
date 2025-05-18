@@ -27,8 +27,10 @@ from typing import Dict, Any, Optional, List, Union
 
 from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel, Field
+from fastapi.staticfiles import StaticFiles
+from typing import Optional, List, Dict, Any, Union
 
 # JSONハンドラーのインポート
 try:
@@ -225,7 +227,9 @@ class MCPFastAPIServer:
         self.app = FastAPI(
             title="Blender Unified MCP API",
             description="Blenderの3D機能にAPIからアクセスするためのModel Context Protocol",
-            version="1.0.0"
+            version="1.1.0",
+            docs_url="/docs",
+            redoc_url="/redoc"
         )
         
         # CORSミドルウェアの設定
@@ -254,6 +258,46 @@ class MCPFastAPIServer:
         async def root():
             """ルートエンドポイント - サーバーステータスを返す"""
             return APIResponse.success("Blender Unified MCP API is running")
+            
+        @self.app.get("/graphiql", response_class=HTMLResponse, tags=["GraphQL"])
+        async def graphiql():
+            """GraphiQL（GraphQLの対話型エクスプローラー）を提供"""
+            return """
+            <!DOCTYPE html>
+            <html>
+              <head>
+                <title>GraphiQL</title>
+                <link href="https://unpkg.com/graphiql/graphiql.min.css" rel="stylesheet" />
+              </head>
+              <body style="margin: 0; height: 100vh; width: 100vw;">
+                <div id="graphiql" style="height: 100vh;"></div>
+
+                <script
+                  crossorigin
+                  src="https://unpkg.com/react/umd/react.production.min.js"
+                ></script>
+                <script
+                  crossorigin
+                  src="https://unpkg.com/react-dom/umd/react-dom.production.min.js"
+                ></script>
+                <script
+                  crossorigin
+                  src="https://unpkg.com/graphiql/graphiql.min.js"
+                ></script>
+
+                <script>
+                  const fetcher = GraphiQL.createFetcher({
+                    url: window.location.origin + '/graphql',
+                  });
+
+                  ReactDOM.render(
+                    React.createElement(GraphiQL, { fetcher }),
+                    document.getElementById('graphiql'),
+                  );
+                </script>
+              </body>
+            </html>
+            """
         
         # API情報エンドポイント
         @self.app.get("/api/info", tags=["Base"])
