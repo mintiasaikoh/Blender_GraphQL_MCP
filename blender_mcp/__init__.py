@@ -179,20 +179,76 @@ class MCPAddonPreferences(bpy.types.AddonPreferences):
         maxlen=15 # 最大長の制限を追加
     )
     
+    log_directory: bpy.props.StringProperty(
+        name="ログディレクトリ",
+        description="ログファイルを保存するディレクトリ",
+        default=logs_dir,
+        subtype='DIR_PATH'
+    )
+    
+    enable_profiling: bpy.props.BoolProperty(
+        name="パフォーマンスプロファイリング",
+        description="パフォーマンスをプロファイリングして最適化機会を検出",
+        default=False
+    )
+    
+    enable_memory_tracking: bpy.props.BoolProperty(
+        name="メモリトラッキング",
+        description="メモリ使用量を追跡して最適化機会を検出",
+        default=False
+    )
+    
+    enable_enhanced_ui: bpy.props.BoolProperty(
+        name="拡張UI",
+        description="進捗状況などを表示する拡張UIを有効化",
+        default=True
+    )
+    
+    language: bpy.props.EnumProperty(
+        name="言語",
+        description="インターフェース言語",
+        items=[
+            ('ja', "日本語", "日本語"),
+            ('en', "English", "英語")
+        ],
+        default='ja'
+    )
+    
     def draw(self, context):
         layout = self.layout
-        layout.prop(self, "server_port")
+        
+        # サーバー設定セクション
+        box = layout.box()
+        box.label(text="サーバー設定", icon='SETTINGS')
+        box.prop(self, "server_port")
         
         # サーバーホスト設定の表示を改善
-        host_row = layout.row()
+        host_row = box.row()
         host_row.label(text="サーバーホスト:")
         host_row.prop(self, "server_host", text="")
         
         # 推奨設定とステータス表示
         if self.server_host != "0.0.0.0":
-            layout.label(text="リモート接続を受け付けるには '0.0.0.0' をお勧めします", icon='INFO')
+            box.label(text="リモート接続を受け付けるには '0.0.0.0' をお勧めします", icon='INFO')
         else:
-            layout.label(text="現在の設定: 全てのインターフェースでリッスン (推奨)", icon='CHECKMARK')
+            box.label(text="現在の設定: 全てのインターフェースでリッスン (推奨)", icon='CHECKMARK')
+        
+        # パフォーマンス最適化セクション
+        perf_box = layout.box()
+        perf_box.label(text="パフォーマンス設定", icon='GRAPH')
+        perf_box.prop(self, "enable_profiling")
+        perf_box.prop(self, "enable_memory_tracking")
+        
+        # UI設定セクション
+        ui_box = layout.box()
+        ui_box.label(text="UI設定", icon='WINDOW')
+        ui_box.prop(self, "enable_enhanced_ui")
+        ui_box.prop(self, "language")
+        
+        # ログ設定セクション
+        log_box = layout.box()
+        log_box.label(text="ログ設定", icon='TEXT')
+        log_box.prop(self, "log_directory")
 
 # UI定義
 class MCP_PT_server_panel(bpy.types.Panel):
@@ -590,6 +646,46 @@ def register():
         logger.warning(f"標準MCP対応の登録ができませんでした: {str(e)}")
     except Exception as e:
         logger.error(f"標準MCP対応の登録でエラーが発生しました: {str(e)}")
+        
+    # 強化モジュールの登録
+    try:
+        from .tools.enhancement_integration import register as register_enhancements
+        register_enhancements()
+        logger.info("強化モジュールを登録しました")
+        
+        # ユーザー設定に基づいて強化機能を有効化
+        addon_prefs = None
+        try:
+            addon_prefs = bpy.context.preferences.addons[__name__].preferences
+        except (KeyError, AttributeError):
+            logger.warning("アドオン設定にアクセスできません")
+        
+        if addon_prefs:
+            from .tools.enhancement_integration import enable_enhancements, set_config
+            
+            # 設定を適用
+            config = {
+                'enable_profiling': addon_prefs.enable_profiling,
+                'enable_memory_tracking': addon_prefs.enable_memory_tracking,
+                'enable_enhanced_ui': addon_prefs.enable_enhanced_ui,
+                'language': addon_prefs.language,
+                'log_dir': addon_prefs.log_directory,
+                'auto_recovery': True,  # 自動リカバリーはデフォルトで有効
+                'hot_path_optimization': True  # ホットパス最適化もデフォルトで有効
+            }
+            set_config(config)
+            
+            # 設定に基づいて強化機能を有効化
+            enable_enhancements(
+                profiling=addon_prefs.enable_profiling,
+                error_tracking=True,  # エラートラッキングは常に有効
+                enhanced_interface=addon_prefs.enable_enhanced_ui
+            )
+            logger.info("ユーザー設定に基づいて強化機能を有効化しました")
+    except ImportError as e:
+        logger.warning(f"強化モジュールの登録ができませんでした: {str(e)}")
+    except Exception as e:
+        logger.error(f"強化モジュールの登録でエラーが発生しました: {str(e)}")
     
     # ハンドラを登録
     if hasattr(bpy.app, 'handlers') and hasattr(bpy.app.handlers, 'save_pre'):
@@ -637,6 +733,16 @@ def unregister():
                     print("MCPサーバーの保存ハンドラを削除しました")
                 except ValueError:
                     pass
+    
+    # 強化モジュールの登録解除
+    try:
+        from .tools.enhancement_integration import unregister as unregister_enhancements
+        unregister_enhancements()
+        logger.info("強化モジュールの登録を解除しました")
+    except ImportError as e:
+        logger.warning(f"強化モジュールの登録解除ができませんでした: {str(e)}")
+    except Exception as e:
+        logger.error(f"強化モジュールの登録解除でエラーが発生しました: {str(e)}")
     
     # 標準MCPサーバーを停止
     try:
